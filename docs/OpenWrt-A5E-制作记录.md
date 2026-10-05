@@ -243,7 +243,9 @@ A5E 内核模块全是 .ko.xz 压缩（Radxa BSP 内核 CONFIG_MODULE_COMPRESS_X
 - 镜像里 `/etc/config/network` 是**空的** —— armsr 的 network 配置是**首启由 `config_generate` 自动生成**的（含 br-lan bridge eth0 定义）。
 - 排查中一度以为：netifd 建桥（netlink）失败而 brctl（ioctl）成功是接口问题；又一度以为是我 `uci delete network.@device[0]` 误删了 br-lan 定义。**这些都是表象/弯路** —— 真正卡点始终是第 2 层的 modprobe 依赖解析。
 
-#### 最终方案：init.d 启动早期预加载（绕过 modprobe）
+#### 备用方案：init.d 启动早期预加载（绕过 modprobe）
+
+> ⚠ 本方案已降级为**回退方案**。根治方案是重编内核让 `CONFIG_BRIDGE=y`，详见 **`radxa-a5e-openwrt-kernel/docs/A5E-内核编译-记录.md`**。已验证的成品镜像使用新内核（bridge builtin）；本节保留的 init.d 方案产物保留在 `owrt-a5e.img.bak-initd`，万一需回滚可直接使用。
 
 既然 `insmod` 按依赖顺序手动加载确定能成，做成开机脚本，在 netifd（START=20）之前预加载：
 
@@ -278,6 +280,16 @@ ip addr show br-lan                  # 应自动建好 192.168.1.1
 
 - init.d 是**绕过**方案，modprobe 依赖解析的根本 bug（kmodloader 对 aw2607 模块格式）**未根治**。其它需要 modprobe 的模块（如 WiFi）若走 kmodloader 自动加载，可能仍需类似处理。
 - firewall 的 nftables/Netfilter 模块（`nf_tables`、`nft_*`）也可能是 .ko.xz → 已一并转 .ko，但其自动加载是否踩同样的坑，**待验证**（见第 6 章已知问题）。
+
+#### 根治方案（推荐）：重编内核 使 bridge builtin
+
+将 `CONFIG_BRIDGE=m` 改为 `CONFIG_BRIDGE=y`，Kconfig select 会自动把 `LLC`/`STP` 也拉到 `=y`（实测确认）。内核 vmlinux 自带桥 → netifd 直接建 `br-lan` → **无需 modprobe / insmod，也不需要 init.d 预加载**。
+
+完整可复现步骤（含 patch 两种前缀、`libssl-dev:arm64`、deb 里 vmlinuz 是 gzip 的陷阱、OpenWrt 镜像安装）见 **`radxa-a5e-openwrt-kernel/docs/A5E-内核编译-记录.md`**（已包装为 GitHub Actions）。
+
+已验证交付：
+- 新镜像：`owrt-a5e.img`（sha256 见 `owrt-a5e.img.sha256`）
+- 旧镜像（init.d 回退）：`owrt-a5e.img.bak-initd`
 
 ---
 
@@ -374,8 +386,10 @@ sudo dd if=owrt-a5e.img of=/dev/sdX bs=4M conv=fsync status=progress && sync
 
 ## 7. 关键文件与目录
 
+> 路径基于工作根 `$WS`（你检出 `radxa-a5e` 的位置，例如 `$HOME/work/radxa-a5e`）。
+
 ```
-/home/xiu/Data/hermes/workspace/radxa-a5e/
+$WS/
 ├── owrt-a5e.img                  # 最终 OpenWrt 镜像（859MB）
 ├── owrt-a5e.img.sha256
 ├── out/                          # Debian 原版镜像构建产物

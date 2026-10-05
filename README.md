@@ -20,7 +20,9 @@ openwrt-a5e-build/
 ├── scripts/
 │   ├── 00-lib.sh                # 版本/URL/路径/分区LBA/引导参数（改这里）
 │   ├── 10-build-debian.sh       # rsdk build -T → out/（取内核/u-boot 资产）
-│   ├── 20-extract-kernel.sh     # 从 out/rootfs.tar 提取内核资产 → owrt/a5e-kernel/
+│   ├── 10-build-debian.sh       # 【仅首次】rsdk build -T → out/（取 build-image/u-boot/initrd）
+│   ├── 20-extract-kernel.sh     # 【仅首次】从 out/rootfs.tar 提取资产 → owrt/a5e-kernel/
+│   ├── 25-fetch-kernel.sh       # ★日常内核来源：从 kernel-actions Release 下载 vmlinuz+modules
 │   ├── 30-fetch-openwrt.sh      # 下载 ImmortalWrt armsr rootfs（校验 sha256）
 │   ├── 40-assemble-rootfs.sh    # ★拼装：openwrt+A5E内核+全部定制 → rootfs.tar
 │   ├── 50-build-image.sh        # guestfish build-image → owrt-a5e.img
@@ -42,6 +44,7 @@ openwrt-a5e-build/
 
 | 改动 | 实现 | 对应坑 | 状态 |
 |---|---|---|---|
+| 内核改用自编译版(kernel-actions) | `25-fetch-kernel.sh` | 上游 linux-aw2607 + fragment，bridge/fw4/tproxy **已 builtin** → 免 .ko.xz 转换与 bridge 预加载 | ★ 推荐 |
 | 引导加 `coherent_pool=2M` | `40` 的 APPEND_PARAMS | 坑1 sunxi_mmc DMA 挂死 | ✅ |
 | `root=UUID=<真实fs UUID>` | `50` build-image 用 blkid 注入 | 坑2/3 引导链 | ✅ |
 | 短路 `mount_root` | `patches/40-mount-root-skip.sh` | 坑2 fstools 只认短PARTUUID/尾02 | ✅ |
@@ -64,7 +67,10 @@ openwrt-a5e-build/
 ```bash
 # 需在 rsdk devcontainer（KVM + binfmt/qemu + guestfish，50 步需 sudo）
 cd openwrt-a5e-build
-./build.sh                 # 全流程：10→20→30→40→50
+# 日常构建（不跑 rsdk，需 kernel-actions release 已产出）：
+./build.sh                 # KSRC=kernel-actions：25→30→40→50
+# 首次（取 u-boot/initrd/build-image 资产，需 rsdk devcontainer）：
+./build.sh 10              # 全流程 10→20→25→30→40→50
 # 或改完定制只重拼装+打包：
 ./build.sh 40
 

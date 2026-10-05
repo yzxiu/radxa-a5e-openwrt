@@ -38,6 +38,19 @@ PATCHES="$WORK/patches"          # sed 补丁脚本
 ROOTFS_LBA=${ROOTFS_LBA:-679936}
 ROOTFS_SECT=${ROOTFS_SECT:-998433}
 
+# ---- 内核来源 KSRC -----------------------------------------------------------
+# kernel-actions（默认，日常构建，不碰 rsdk）：从 yzxiu/radxa-a5e-openwrt-kernel 的
+#   GitHub Release 下载 vmlinuz(未压缩) + modules-and-dtb.tar(.ko 已展开、dep 已修、
+#   bridge·fw4·tproxy 已 builtin)。u-boot/initrd 仍复用 rsdk 首次提取的现有资产。
+# rsdk（仅首次取 u-boot/initrd/build-image 资产时才用，需 devcontainer）。
+KSRC=${KSRC:-kernel-actions}
+KERNEL_ACTIONS_REPO=${KERNEL_ACTIONS_REPO:-yzxiu/radxa-a5e-openwrt-kernel}
+KERNEL_ACTIONS_TAG=${KERNEL_ACTIONS_TAG:-latest}      # latest 或具体 v*
+KA_DIR="$OWRT/a5e-kernel-actions"                      # 下载/解压目录
+# u-boot / initrd 来源（两模式都用 rsdk 首次提取的现有资产，不重跑 rsdk）
+UBOOT_SRC="$KERNEL_DIR/$UBOOT_DIR"
+INITRD_SRC="$KERNEL_DIR/initrd.img-$KVER"
+
 # ---- 引导参数（extlinux append；root=UUID 由 build-image 用 blkid 注入，勿硬编码）----
 APPEND_PARAMS="console=ttyAS0,115200n8 earlyprintk=sunxi-uart,0x2500000 rootwait clk_ignore_unused mac_addr=\${mac} mac1_addr=\${mac1} loglevel=4 rw earlycon consoleblank=0 console=tty1 coherent_pool=2M irqchip.gicv3_pseudo_nmi=0"
 

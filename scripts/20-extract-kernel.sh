@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # ============================================================================
-# 步骤2：从 Debian 的 out/rootfs.tar 提取 A5E 内核资产 → owrt/a5e-kernel/
+# 步骤2：【仅首次】从 Debian 的 out/rootfs.tar 提取 A5E 资产 → owrt/a5e-kernel/
+# ----------------------------------------------------------------------------
+# ⚠ 日常构建的内核改用 kernel-actions（25-fetch-kernel.sh）。本步只需在首次跑一次，
+#   目的从“取内核”转为“取 u-boot + initrd”（这两样 kernel-actions 不产出）：
+#     u-boot: setup.sh + u-boot-sunxi-with-spl.bin（SPL 写到 LBA 256，非传统 LBA0/8）
+#     initrd: initrd.img-<KVER>（Debian initramfs，坑4 靠它稳定挂载）
 # ----------------------------------------------------------------------------
 # 需要的资产（后续拼进 OpenWrt rootfs）：
 #   vmlinuz-<KVER> / initrd.img-<KVER> / <DTB> / lib/modules/<KVER>（含 .ko.xz）
