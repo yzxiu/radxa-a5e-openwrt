@@ -27,13 +27,15 @@ else
   DTB_SRC_DIR="$KERNEL_DIR"
   KO_CONVERT=1
 fi
-[ -f "$UBOOT_SRC" ] || die "缺 u-boot（$UBOOT_SRC），rsdk 首次提取资产不可少"
+[ -d "$UBOOT_SRC" ] || die "缺 u-boot 目录（$UBOOT_SRC），rsdk 首次提取资产不可少"
 [ -f "$INITRD_SRC" ] || warn "缺 initrd（$INITRD_SRC），将无 initramfs 引导（坑4 风险）"
 
 log "KSRC=$KSRC  KVER=$KVER  vmlinuz=$(basename "$VMLINUZ")"
 
-log "① 解开 openwrt 通用 rootfs → $ROOTFS_DIR"
-rm -rf "$ROOTFS_DIR"; mkdir -p "$ROOTFS_DIR"
+log "① 解开 openwrt 通用 rootfs →（全新临时装配目录，避开历史 root 属主残留）"
+# 每次用独立临时目录装配：既干净可复现，又绕开 owrt/rootfs 里可能存在的
+# 非本用户可删的 root 属主文件（guestfish/sudo 遗留）。
+ROOTFS_DIR=$(mktemp -d "$OWRT/.assemble.XXXXXX"); trap 'rm -rf "$ROOTFS_DIR"' EXIT
 tar -xf "$OWRT/$OWRT_TAR" -C "$ROOTFS_DIR"
 
 log "② 放入内核（boot/ + lib/modules + boot/dts）"
@@ -89,6 +91,9 @@ else
 fi
 
 log "⑥ 打包 rootfs.tar（保留符号链接/xattr）"
-tar -C "$ROOTFS_DIR" -cf "$OWRT/openwrt-a5e-rootfs.tar" .
+# 输出可能是历史 root 属主的同名文件；owrt/ 当前用户可写 → 先 unlink 再写
+OUTTAR="$OWRT/openwrt-a5e-rootfs.tar"
+rm -f "$OUTTAR" 2>/dev/null || true
+tar -C "$ROOTFS_DIR" -cf "$OUTTAR" .
 echo "   → $OWRT/openwrt-a5e-rootfs.tar ($(du -h "$OWRT/openwrt-a5e-rootfs.tar"|cut -f1))"
 echo "完成。下一步：./scripts/50-build-image.sh（复用 out/build-image）"
