@@ -73,3 +73,19 @@ log "内核就绪：KVER=$KA_KVER  vmlinuz=$VML"
 echo "   modules → $KA_DIR/root/lib/modules/$KA_KVER"
 echo "   dtb     → $KA_DIR/root/usr/lib/linux-image-$KA_KVER/"
 echo "   提示：u-boot/initrd 复用 $KERNEL_DIR（rsdk 首次提取）"
+
+# 记录构建信息（CI release notes / 本地留档）：内核 release tag + BUILD_INFO.env
+# 每次重建（25 重跑）时整文件刷新，rootfs 信息由 30 步追加。
+{
+  echo "# build-info $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "DSRC=$DSRC"
+  echo "KSRC=$KSRC"
+  echo "DEB_TAG=$DEB_TAG"
+  echo "DEB_FLAVOR=$DEB_FLAVOR"
+  echo "KERNEL_RELEASE_TAG=$TAG"
+  echo "KERNEL_RELEASE_URL=https://github.com/$REPO/releases/tag/$TAG"
+  sed 's/^/KA_/' BUILD_INFO.env 2>/dev/null || true
+  echo "KERNEL_KVER=$KA_KVER"
+  echo "KERNEL_VMLINUZ=$VML"
+} > "$OWRT/build-info.env"
+log "构建信息 → owrt/build-info.env（含内核版本，rootfs 信息由 30 步追加）"

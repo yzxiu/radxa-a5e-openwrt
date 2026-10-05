@@ -19,3 +19,24 @@ fi
 
 log "校验 sha256（版本变更时同步改 00-lib.sh 的 OWRT_SHA）"
 echo "$OWRT_SHA  $OWRT_TAR" | sha256sum -c - || die "sha256 不匹配！"
+
+# 记录 rootfs 版本到 build-info.env（25 步已建文件则追加，未跑 25 则自建头）
+if [ ! -f "$OWRT/build-info.env" ]; then
+  {
+    echo "# build-info $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "DSRC=$DSRC"
+    echo "KSRC=$KSRC"
+    echo "DEB_TAG=$DEB_TAG"
+    echo "DEB_FLAVOR=$DEB_FLAVOR"
+  } > "$OWRT/build-info.env"
+fi
+DISTRIB=$(tar -xzf "$OWRT_TAR" -O ./etc/openwrt_release 2>/dev/null \
+            | grep -m1 '^DISTRIB_DESCRIPTION=' | cut -d= -f2- | tr -d "'\"" || true)
+{
+  echo "ROOTFS_VER=$OWRT_VER"
+  echo "ROOTFS_TAG=$OWRT_TAG"
+  echo "ROOTFS_TAR=$OWRT_TAR"
+  echo "ROOTFS_SHA256=$OWRT_SHA"
+  printf "ROOTFS_DISTRIB='%s'\n" "$DISTRIB"
+} >> "$OWRT/build-info.env"
+log "rootfs 版本已追加 → owrt/build-info.env（DISTRIB=$DISTRIB）"

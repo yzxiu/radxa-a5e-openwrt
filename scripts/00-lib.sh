@@ -10,15 +10,18 @@ KVER=6.6.98-1-aw2607                  # Allwinner A527 BSP 内核（非 mainline
 DTB=sun55i-a527-cubie-a5e.dtb         # A5E 设备树（注意 a527 命名，非 a5e）
 UBOOT_DIR=radxa-cubie-a5e             # u-boot 资产目录名（setup.sh + u-boot-sunxi-with-spl.bin）
 
-# ---- OpenWrt 根文件系统（armsr/armv8 通用 = 方案C） ----
-# 官方 OpenWrt 25.12 不支持 A5E（要 6.15/6.16 mainline），故用 armsr 通用 rootfs
-# + A5E 官方内核拼装。rootfs 来自网络编译的 ImmortalWrt。
+# ---- OpenWrt 根文件系统（方案C 的基础 rootfs） ----
+# 官方 OpenWrt 25.12 不支持 A5E（要 6.15/6.16 mainline），故用通用 rootfs
+# + A5E 官方内核拼装。rootfs 来自 yzxiu/router 的网络编译 ImmortalWrt。
+# 用 radxa-a5e 命名的包：当前内容与 armsr/armv8 通用包等同（仅 smartdns web
+# 构建哈希不同），但后续 release 会针对 A5E 做差异化（预装包/配置等），
+# 故锁定这个名字。版本变更时同步更新 OWRT_TAG / OWRT_SHA。
 OWRT_VER=25.12.2
-OWRT_TAG=ImmortalWrt-25.12.2-20261004-2241
+OWRT_TAG=ImmortalWrt-25.12.2-20261005-1909
 OWRT_REPO=yzxiu/router
-OWRT_TAR=immortalwrt-armsr-armv8-generic-rootfs.tar.gz
+OWRT_TAR=radxa-a5e-rootfs.tar.gz
 # 下载后校验；版本变更时更新
-OWRT_SHA=65b66c918e8dbbc290e1c0c303c36f55e9105668ff6196c5a87f2db502b23191
+OWRT_SHA=2c84c4b300156a4b375a2ac1fb08ecbc35d386bcba5dd7138f5ba6465a8b4781
 OWRT_URL="https://github.com/${OWRT_REPO}/releases/download/${OWRT_TAG}/${OWRT_TAR}"
 
 # ---- 路径（相对仓库外层工作区根 radxa-a5e/）----
