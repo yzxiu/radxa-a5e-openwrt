@@ -1,0 +1,20 @@
+# 大二进制 / 中间产物（正常位于仓库外层工作区，此处防误入版本库）
+*.img
+*.img.sha256
+*.tar
+*.tar.gz
+*.gz
+*.xz
+out/
+owrt/
+downloads/
+temp_dir/
+
+# Python / 系统垃圾
+__pycache__/
+*.pyc
+*.log
+.DS_Store
+
+# 调试提取的临时分区裸盘
+rp.img

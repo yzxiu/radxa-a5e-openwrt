@@ -1,0 +1,12 @@
+#!/bin/sh /etc/rc.common
+# Pre-load bridge kernel modules in dependency order (llc -> stp -> bridge).
+# The stock kmodloader/modprobe fails dependency resolution for this kernel's
+# module format, so we insmod by explicit path instead (proven to work).
+START=15
+
+start() {
+	local M="/lib/modules/$(uname -r)/kernel"
+	grep -q '^llc '    /proc/modules || insmod "$M/net/llc/llc.ko"
+	grep -q '^stp '    /proc/modules || insmod "$M/net/802/stp.ko"
+	grep -q '^bridge ' /proc/modules || insmod "$M/net/bridge/bridge.ko"
+}
