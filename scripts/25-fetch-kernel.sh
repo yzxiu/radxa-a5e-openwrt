@@ -17,11 +17,14 @@ cd "$(dirname "$0")/.." && source scripts/00-lib.sh
 mkdir -p "$KA_DIR"; cd "$KA_DIR"
 REPO="$KERNEL_ACTIONS_REPO"; TAG="$KERNEL_ACTIONS_TAG"
 
-log "解析 release tag（latest → 实际 v*）"
+log "解析 release tag（latest → 实际 tag）"
 API="https://api.github.com/repos/$REPO/releases"
 if [ "$TAG" = latest ]; then
-  TAG=$(curl -fsSL "$API/latest" | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1)
-  [ -n "$TAG" ] || die "拿不到 latest release（该仓库可能还没打 v* tag，或无网/需 token）"
+  TAG=$(curl -fsSL "$API/latest" 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1) || true
+  # /latest 只返回非 prerelease；当前 release 是 dev-build(prerelease) 会 404（pipefail 下会触发 set -e，故上句 || true）→
+  # 回退取 releases 列表里最新一个（含 prerelease / dev-build）
+  [ -n "$TAG" ] || TAG=$(curl -fsSL "$API?per_page=1" 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1) || true
+  [ -n "$TAG" ] || die "拿不到任何 release（无网 / 需 token / 该仓库还没 release）"
 fi
 echo "  tag = $TAG"
 

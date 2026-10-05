@@ -99,6 +99,15 @@ sudo dd if=../owrt-a5e.img of=/dev/sdX bs=4M conv=fsync status=progress && sync
 
 离线 `debugfs` 抽查成品 img 六项定制全部落地：inittab `ttyAS0`、`bridge.ko`(非 .ko.xz)、firewall WAN 规则、dropbear 注释 lan、`mount_root` 短路、extlinux 含 `coherent_pool=2M`+`ttyAS0`，且 `root=UUID` 被 build-image 注入为**新随机值**（实证坑3）。
 
+### 内核走 kernel-actions（dev-build，实测通过）
+
+`KSRC=kernel-actions`（默认）跑通 `25→40→50`，镜像用自编译内核：
+
+- **25** 从 `yzxiu/radxa-a5e-openwrt-kernel` release 拉取：tag=`dev-build`（prerelease，`/latest` 404 → 脚本回退取 releases 列表最新一个）。产物核对：`vmlinuz-6.6.98-1-aw2607` 是**未压缩 ARM64 Image**（非 gzip，坑4 解决）；840 个 `.ko`、0 个 `.ko.xz`；`modules.dep` 里 bridge 条目=0（**bridge 已 builtin**）。
+- **40** 自动跳过 `50-modules-ko-convert` 与 bridge 预加载 init.d（kernel 已展开 .ko + builtin）。
+- **50** 容器打包，`debugfs` 抽查：vmlinuz 未压缩 Image、无 bridge-modules 脚本、inittab ttyAS0、firewall WAN、`mount_root` 短路、extlinux `coherent_pool=2M`+`root=UUID` 新随机值。
+- 结论：**坑1/4/7 的绕行方案（.ko.xz 转换、gzip 解包、bridge 预加载）全部不再需要**。
+
 ## 关键事实备忘
 
 - **SPL 写在 LBA 256**（`setup.sh`，非传统 LBA0/8）；引导 = extlinux（`/boot/extlinux/extlinux.conf`），不是 EFI/systemd-boot。
