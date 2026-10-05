@@ -18,3 +18,4 @@ __pycache__/
 
 # 调试提取的临时分区裸盘
 rp.img
+dist/

@@ -83,11 +83,13 @@ jobs:
             && echo "✓ a5e dtb 在 usr/lib/linux-image/allwinner/" || { echo "✗ dtb 缺"; exit 1; }
           if tar -tf "$T" | grep -q "etc/init.d/bridge-modules"; then echo "✗ 不该有 bridge workaround"; exit 1; else echo "✓ 无 bridge workaround（kernel-actions 已 builtin）"; fi
 
+      - name: stage rootfs.tar into workspace
+        run: mkdir -p dist && cp ../owrt/openwrt-a5e-rootfs.tar dist/
       - name: upload rootfs.tar (milestone artifact)
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-a5e-rootfs
-          path: ../owrt/openwrt-a5e-rootfs.tar
+          path: dist/openwrt-a5e-rootfs.tar
           retention-days: 14
 
       # ---- 50：guestfish 打包（无 KVM 走 TCG）----
@@ -110,12 +112,14 @@ jobs:
           debugfs -R "stat /usr/lib/linux-image-*/allwinner/sun55i-a527-cubie-a5e.dtb" /tmp/v.img 2>/dev/null | grep -E "Inode|Size" && echo "✓ dtb 落地"
           rm -f /tmp/v.img
 
+      - name: stage image into workspace
+        run: mkdir -p dist && cp ../owrt-a5e.img ../owrt-a5e.img.sha256 dist/
       - name: upload final image
         uses: actions/upload-artifact@v4
         with:
           name: owrt-a5e-img
           path: |
-            ../owrt-a5e.img
-            ../owrt-a5e.img.sha256
+            dist/owrt-a5e.img
+            dist/owrt-a5e.img.sha256
           retention-days: 30
           if-no-files-found: error
