@@ -20,11 +20,24 @@ REPO="$KERNEL_ACTIONS_REPO"; TAG="$KERNEL_ACTIONS_TAG"
 log "解析 release tag（latest → 实际 tag）"
 API="https://api.github.com/repos/$REPO/releases"
 if [ "$TAG" = latest ]; then
-  TAG=$(curl -fsSL "$API/latest" 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1) || true
-  # /latest 只返回非 prerelease；当前 release 是 dev-build(prerelease) 会 404（pipefail 下会触发 set -e，故上句 || true）→
-  # 回退取 releases 列表里最新一个（含 prerelease / dev-build）
-  [ -n "$TAG" ] || TAG=$(curl -fsSL "$API?per_page=1" 2>/dev/null | sed -n 's/.*"tag_name": *"\([^"]*\)".*/\1/p' | head -1) || true
+  # 直接取 releases 列表里 created_at 最新的一条（正式/pre 都算，不含 draft）
+  TAG=$(curl -fsSL "$API?per_page=100" | python3 -c '
+import sys, json
+d=json.load(sys.stdin)
+rel=[r for r in d if not r.get("draft", False)]
+rel.sort(key=lambda r: r["published_at"] or r["created_at"], reverse=True)
+print(rel[0]["tag_name"] if rel else "")'
+  ) || true
   [ -n "$TAG" ] || die "拿不到任何 release（无网 / 需 token / 该仓库还没 release）"
+  REL_INFO=$(curl -fsSL "$API/tags/$TAG" | python3 -c '
+import sys, json
+r=json.load(sys.stdin)
+print(f"title={r.get(\"name\")!r} published={r.get(\"published_at\")!r} prerelease={r.get(\"prerelease\")!r} created_at={r.get(\"created_at\")!r}")'
+  )
+  log "取最新 release：$TAG"
+  echo "  $REL_INFO"
+else
+  log "按 KERNEL_ACTIONS_TAG 锁定 release：$TAG"
 fi
 echo "  tag = $TAG"
 

@@ -148,8 +148,8 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
-  # build 成功即发 Release：push/dispatch → 按时间戳生成唯一 prerelease（dev-<日期时分秒>-r<run>，
-  # 每次一条不覆盖）；打 v* tag → 正式 release
+  # build 成功即发 Release：每次成功构建 → 一条正式 release
+  # （tag = rel-<UTC 日期时分秒>-r<run号>，唯一不覆盖、不依赖 v* tag 触发）
   release:
     needs: build
     if: needs.build.result == 'success'
@@ -177,46 +177,32 @@ jobs:
             cp bundle/owrt-a5e.img bundle/owrt-a5e.img.sha256 dist/
           fi
           ls -lh dist/
-          # 正式 tag → 同名 release（重跑才覆盖）；push/dispatch → 按 UTC 日期时分秒+run号
-          # 生成唯一 dev tag，每次一条独立 prerelease，不再固定 dev-build 反复覆盖。
-          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            TAG="$GITHUB_REF_NAME"; TITLE="A5E OpenWrt image $GITHUB_REF_NAME"; EXTRA=""
-          else
-            STAMP="$(date -u +%Y%m%d-%H%M%S)"
-            TAG="dev-${STAMP}-r${GITHUB_RUN_NUMBER}"
-            TITLE="A5E OpenWrt image dev-${STAMP} (run #${GITHUB_RUN_NUMBER})"
-            EXTRA="--prerelease"
-          fi
-          NOTES="**Automated image build** from commit \`${GITHUB_SHA}\` (run #${GITHUB_RUN_NUMBER})
+          # 所有构建都发正式 release（不带 --prerelease），tag 按 UTC 时间戳+run号唯一，
+          # 不依赖人工打 v* tag 触发。
+          STAMP="$(date -u +%Y%m%d-%H%M%S)"
+          TAG="rel-${STAMP}-r${GITHUB_RUN_NUMBER}"
+          REPONAME="${GH_REPO##*/}"
+          TITLE="${REPONAME}-$(date -u +%Y%m%d-%H%M)"
+          NOTES="**正式 release** from commit \`${GITHUB_SHA}\` (run #${GITHUB_RUN_NUMBER})
 
-          烧录前先校验：sha256sum -c owrt-a5e.img.sha256
-          烧录：sudo dd if=owrt-a5e.img of=/dev/sdX bs=4M status=progress conv=fsync && sync
+          产物：owrt-a5e.img.tar.gz（标准归档、小）+ owrt-a5e.img.sha256
+
+          烧录：
+          tar -xzf owrt-a5e.img.tar.gz
+          sha256sum -c owrt-a5e.img.sha256
+          sudo dd if=owrt-a5e.img of=/dev/sdX bs=4M status=progress conv=fsync && sync
 
           内含：kernel-actions 定制内核（bridge/fw4/tproxy 已 builtin）、a5e dtb 已落到
           /usr/lib/linux-image/*/allwinner/、firewall WAN 放行、root=UUID 由 build-image 注入。"
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" dist/* --clobber
-            [[ "${GITHUB_REF}" != refs/tags/* ]] && gh release edit "$TAG" --target "$GITHUB_SHA" --title "$TITLE"
+            gh release edit "$TAG" --title "$TITLE"
             echo "updated release: $TAG"
           else
-            # shellcheck disable=SC2086
-            gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TITLE" $EXTRA --notes "$NOTES" \
+            gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TITLE" --notes "$NOTES" \
               || { echo "[warn] 直连 create 失败，改用 --draft 创建→上传→发布"; \
-                   gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TITLE" $EXTRA --notes "$NOTES"; \
+                   gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TITLE" --notes "$NOTES"; \
                    gh release upload "$TAG" dist/* --clobber; \
                    gh release edit "$TAG" --draft=false; }
             echo "created release: $TAG"
-          fi
-
-      # 一次性清理旧“滚动 dev-build”机制遗留的 release（+tag）。
-      # 删除成功后本步每轮仅 no-op（view 不命中），无害且防误残留。
-      - name: cleanup legacy dev-build release
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: |
-          if gh release view dev-build >/dev/null 2>&1; then
-            gh release delete dev-build --cleanup-tag --yes && echo "✓ 已删除遗留 dev-build release(+tag)"
-          else
-            echo "dev-build 不存在，跳过"
           fi
