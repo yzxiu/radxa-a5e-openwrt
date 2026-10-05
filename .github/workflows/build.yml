@@ -5,7 +5,9 @@ name: Build A5E OpenWrt Image
 #   - push 到 main 且改了构建相关文件
 # 流程：15 下 Debian 资产 → 20 tar 提取 u-boot/initrd → 25 拉 kernel-actions 内核
 #       → 30 下 ImmortalWrt rootfs → 40 拼装 rootfs.tar → 50 guestfish 打包 img
-# 15/20/25/30/40 纯文件操作免 KVM；50 需 guestfish（无 /dev/kvm 走 TCG，慢但可用）。
+# 打包(50)用 **nix 的 libguestfs-with-appliance**（自带 fixed appliance 内核，不碰宿主
+# /boot，也不走 supermin），与 rsdk devenv 完全一致 —— apt 版 guestfish 在 Actions 会因
+# azure 云核 root-only 触发 supermin `cp /boot/vmlinuz-*-azure: Permission denied`。
 
 on:
   workflow_dispatch:
@@ -36,7 +38,7 @@ permissions:
 
 env:
   DEBIAN_FRONTEND: noninteractive
-  LIBGUESTFS_BACKEND: direct          # 直连 qemu，不经 libvirtd（Actions 无 libvirtd）
+  LIBGUESTFS_BACKEND: direct          # nix libguestfs 直连 qemu，不经 libvirtd
 
 jobs:
   build:
@@ -45,35 +47,24 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: install build deps
+      - name: install host tools (非 guestfish：下载/打包/rootfs 操作用)
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             curl ca-certificates xz-utils cpio rsync python3 tar coreutils \
-            libguestfs-tools qemu-utils qemu-system-x86
-          echo "guestfish: $(command -v guestfish)"; guestfish --version
+            e2fsprogs util-linux parted
 
-      - name: guestfish appliance 冒烟诊断（定位 supermin 失败原因，不中断）
-        env:
-          LIBGUESTFS_BACKEND: direct
-          LIBGUESTFS_DEBUG: "1"
-        continue-on-error: true
+      - name: setup nix (提供 libguestfs-with-appliance)
+        uses: DeterminateSystems/nix-installer-action@main
+
+      - name: warm nix cache
+        uses: DeterminateSystems/magic-nix-cache-action@main
+
+      - name: guestfish(nix) 冒烟（自带 fixed appliance，应能直接 run）
         run: |
-          {
-            echo "uname -r      = $(uname -r)"
-            echo "-- host kernel 文件 --"
-            ls -l "/lib/modules/$(uname -r)" 2>&1 | head -3
-            ls -l /boot/vmlinuz-* 2>&1 | head
-            echo "-- qemu / supermin --"
-            command -v qemu-system-x86_64 qemu-system-arm; command -v supermin
-            dpkg -l | grep -iE "linux-image|qemu-system|supermin" | head
-            echo "-- guestfish run（会打印 supermin 具体缺什么）--"
-            guestfish -a /dev/null run
-          } 2>&1 | tee /tmp/lfsmoke.log | grep -iE "uname|supermin|kernel|error|missing|appliance|/boot|vmlinuz|qemu" | head -50
-          echo "=== 冒烟关键行已进 summary ==="
-          grep -iE "supermin|kernel|error|missing|/boot/vmlinuz" /tmp/lfsmoke.log | tail -25 >> "$GITHUB_STEP_SUMMARY" || true
+          nix shell nixpkgs#libguestfs-with-appliance nixpkgs#guestfs-tools nixpkgs#qemu --run 'guestfish --version && guestfish -a /dev/null run && echo "✓ nix guestfish appliance OK"'
 
-      # ---- 15→40：下载 + 提取 + 拼装，全部纯文件操作，无 KVM 依赖 ----
+      # ---- 15→40：下载 + 提取 + 拼装，全部纯文件操作，无 guestfish ----
       - name: 15 fetch radxa Debian assets (build-image + rootfs.tar.xz)
         env:
           DEB_TAG: ${{ inputs.deb_tag || 'rsdk-t10' }}
@@ -105,6 +96,7 @@ jobs:
 
       - name: stage rootfs.tar into workspace
         run: mkdir -p dist && cp ../owrt/openwrt-a5e-rootfs.tar dist/
+
       - name: upload rootfs.tar (milestone artifact)
         uses: actions/upload-artifact@v4
         with:
@@ -112,12 +104,19 @@ jobs:
           path: dist/openwrt-a5e-rootfs.tar
           retention-days: 14
 
-      # ---- 50：guestfish 打包（无 KVM 走 TCG）----
-      - name: 50 build image (guestfish)
-        env:
-          LIBGUESTFS_DEBUG: "1"
+      # ---- 50：guestfish 打包（nix libguestfs-with-appliance）----
+      - name: 50 build image (nix guestfish)
         run: |
-          bash scripts/50-build-image.sh 2>&1 | tail -120
+          # util-linux(blkid) / parted / e2fsprogs 供 build-image 脚本的 !command 用
+          nix shell \
+            nixpkgs#libguestfs-with-appliance \
+            nixpkgs#guestfs-tools \
+            nixpkgs#qemu \
+            nixpkgs#util-linux \
+            nixpkgs#parted \
+            nixpkgs#e2fsprogs \
+            nixpkgs#file \
+            --run 'bash scripts/50-build-image.sh' 2>&1 | tail -120
 
       - name: 校验成品镜像
         run: |
@@ -125,22 +124,20 @@ jobs:
           IMG="../owrt-a5e.img"
           [ -f "$IMG" ] || { echo "✗ 没产出 img"; exit 1; }
           ls -lh "$IMG"; cat "../owrt-a5e.img.sha256"
-          # 分区表可能随 shrink 变，动态读 p3
           S=$(partx -g -o START --nr 3 "$IMG"); N=$(partx -g -o SECTORS --nr 3 "$IMG")
           dd if="$IMG" of=/tmp/v.img bs=512 skip="$S" count="$N" status=none
-          echo "-- dtb 在 img 里 --"
-          guestfish --ro -a /dev/null run : echo ok >/dev/null 2>&1 || true
           debugfs -R "stat /usr/lib/linux-image-*/allwinner/sun55i-a527-cubie-a5e.dtb" /tmp/v.img 2>/dev/null | grep -E "Inode|Size" && echo "✓ dtb 落地"
           rm -f /tmp/v.img
 
       - name: stage image into workspace
         run: mkdir -p dist && cp ../owrt-a5e.img ../owrt-a5e.img.sha256 dist/
+
       - name: upload final image
         uses: actions/upload-artifact@v4
         with:
           name: owrt-a5e-img
           path: |
             dist/owrt-a5e.img
-            dist/owrt-a5e.img.sha256
+            dist/owrt-a5e-img.sha256
           retention-days: 30
           if-no-files-found: error
