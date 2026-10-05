@@ -130,8 +130,12 @@ jobs:
           debugfs -R "stat /usr/lib/linux-image-*/allwinner/sun55i-a527-cubie-a5e.dtb" /tmp/v.img 2>/dev/null | grep -E "Inode|Size" && echo "✓ dtb 落地"
           rm -f /tmp/v.img
 
-      - name: stage image into workspace
-        run: mkdir -p dist && cp ../owrt-a5e.img ../owrt-a5e.img.sha256 dist/
+      - name: stage image + gzip into workspace
+        run: |
+          mkdir -p dist
+          cp ../owrt-a5e.img ../owrt-a5e.img.sha256 dist/
+          gzip -6 -c ../owrt-a5e.img > dist/owrt-a5e.img.gz
+          ls -lh dist/
 
       - name: upload final image
         uses: actions/upload-artifact@v4
@@ -139,7 +143,8 @@ jobs:
           name: owrt-a5e-img
           path: |
             dist/owrt-a5e.img
-            dist/owrt-a5e-img.sha256
+            dist/owrt-a5e.img.gz
+            dist/owrt-a5e.img.sha256
           retention-days: 30
           if-no-files-found: error
 
@@ -148,6 +153,8 @@ jobs:
     needs: build
     if: needs.build.result == 'success'
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: download img artifact
         uses: actions/download-artifact@v4
@@ -161,7 +168,14 @@ jobs:
           GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
-          mkdir -p dist && cp bundle/owrt-a5e.img bundle/owrt-a5e.img.sha256 dist/
+          mkdir -p dist
+          # 优先发布压缩版 img.gz（小、上传稳）+ sha256；无则回退整 img
+          if [ -f bundle/owrt-a5e.img.gz ]; then
+            cp bundle/owrt-a5e.img.gz bundle/owrt-a5e.img.sha256 dist/
+          else
+            cp bundle/owrt-a5e.img bundle/owrt-a5e.img.sha256 dist/
+          fi
+          ls -lh dist/
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="$GITHUB_REF_NAME"; TITLE="A5E OpenWrt image $GITHUB_REF_NAME"; EXTRA=""
           else
@@ -180,6 +194,10 @@ jobs:
             echo "updated release: $TAG"
           else
             # shellcheck disable=SC2086
-            gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TITLE" $EXTRA --notes "$NOTES"
+            gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TITLE" $EXTRA --notes "$NOTES" \
+              || { echo "[warn] 直连 create 失败，改用 --draft 创建→上传→发布"; \
+                   gh release create "$TAG" --draft --target "$GITHUB_SHA" --title "$TITLE" $EXTRA --notes "$NOTES"; \
+                   gh release upload "$TAG" dist/* --clobber; \
+                   gh release edit "$TAG" --draft=false; }
             echo "created release: $TAG"
           fi
