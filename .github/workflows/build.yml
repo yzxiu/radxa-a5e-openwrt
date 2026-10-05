@@ -207,3 +207,16 @@ jobs:
                    gh release edit "$TAG" --draft=false; }
             echo "created release: $TAG"
           fi
+
+      # 一次性清理旧“滚动 dev-build”机制遗留的 release（+tag）。
+      # 删除成功后本步每轮仅 no-op（view 不命中），无害且防误残留。
+      - name: cleanup legacy dev-build release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          if gh release view dev-build >/dev/null 2>&1; then
+            gh release delete dev-build --cleanup-tag --yes && echo "✓ 已删除遗留 dev-build release(+tag)"
+          else
+            echo "dev-build 不存在，跳过"
+          fi
