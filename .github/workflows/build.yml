@@ -62,7 +62,7 @@ jobs:
 
       - name: guestfish(nix) 冒烟（自带 fixed appliance，应能直接 run）
         run: |
-          nix shell nixpkgs#libguestfs-with-appliance nixpkgs#guestfs-tools nixpkgs#qemu --run 'guestfish --version && guestfish -a /dev/null run && echo "✓ nix guestfish appliance OK"'
+          nix shell nixpkgs#libguestfs-with-appliance nixpkgs#guestfs-tools nixpkgs#qemu --command bash -c 'guestfish --version && guestfish -a /dev/null run && echo "✓ nix guestfish appliance OK"'
 
       # ---- 15→40：下载 + 提取 + 拼装，全部纯文件操作，无 guestfish ----
       - name: 15 fetch radxa Debian assets (build-image + rootfs.tar.xz)
@@ -116,7 +116,7 @@ jobs:
             nixpkgs#parted \
             nixpkgs#e2fsprogs \
             nixpkgs#file \
-            --run 'bash scripts/50-build-image.sh' 2>&1 | tail -120
+            --command bash scripts/50-build-image.sh 2>&1 | tail -120
 
       - name: 校验成品镜像
         run: |
