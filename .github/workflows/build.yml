@@ -142,3 +142,44 @@ jobs:
             dist/owrt-a5e-img.sha256
           retention-days: 30
           if-no-files-found: error
+
+  # build 成功即发 Release：push/dispatch → 滚动 prerelease "dev-build"；打 v* tag → 正式 release
+  release:
+    needs: build
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    steps:
+      - name: download img artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: owrt-a5e-img
+          path: bundle/
+
+      - name: publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist && cp bundle/owrt-a5e.img bundle/owrt-a5e.img.sha256 dist/
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="$GITHUB_REF_NAME"; TITLE="A5E OpenWrt image $GITHUB_REF_NAME"; EXTRA=""
+          else
+            TAG="dev-build"; TITLE="A5E OpenWrt image dev-build"; EXTRA="--prerelease"
+          fi
+          NOTES="**Automated image build** from commit \`${GITHUB_SHA}\` (run #${GITHUB_RUN_NUMBER})
+
+          烧录前先校验：sha256sum -c owrt-a5e.img.sha256
+          烧录：sudo dd if=owrt-a5e.img of=/dev/sdX bs=4M status=progress conv=fsync && sync
+
+          内含：kernel-actions 定制内核（bridge/fw4/tproxy 已 builtin）、a5e dtb 已落到
+          /usr/lib/linux-image/*/allwinner/、firewall WAN 放行、root=UUID 由 build-image 注入。"
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" dist/* --clobber
+            [[ "${GITHUB_REF}" != refs/tags/* ]] && gh release edit "$TAG" --target "$GITHUB_SHA" --title "$TITLE"
+            echo "updated release: $TAG"
+          else
+            # shellcheck disable=SC2086
+            gh release create "$TAG" dist/* --target "$GITHUB_SHA" --title "$TITLE" $EXTRA --notes "$NOTES"
+            echo "created release: $TAG"
+          fi
