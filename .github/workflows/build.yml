@@ -130,11 +130,11 @@ jobs:
           debugfs -R "stat /usr/lib/linux-image-*/allwinner/sun55i-a527-cubie-a5e.dtb" /tmp/v.img 2>/dev/null | grep -E "Inode|Size" && echo "✓ dtb 落地"
           rm -f /tmp/v.img
 
-      - name: stage image + gzip into workspace
+      - name: stage image + tar.gz into workspace
         run: |
           mkdir -p dist
           cp ../owrt-a5e.img ../owrt-a5e.img.sha256 dist/
-          gzip -6 -c ../owrt-a5e.img > dist/owrt-a5e.img.gz
+          tar -C dist -czf dist/owrt-a5e.img.tar.gz owrt-a5e.img
           ls -lh dist/
 
       - name: upload final image
@@ -143,12 +143,13 @@ jobs:
           name: owrt-a5e-img
           path: |
             dist/owrt-a5e.img
-            dist/owrt-a5e.img.gz
+            dist/owrt-a5e.img.tar.gz
             dist/owrt-a5e.img.sha256
           retention-days: 30
           if-no-files-found: error
 
-  # build 成功即发 Release：push/dispatch → 滚动 prerelease "dev-build"；打 v* tag → 正式 release
+  # build 成功即发 Release：push/dispatch → 按时间戳生成唯一 prerelease（dev-<日期时分秒>-r<run>，
+  # 每次一条不覆盖）；打 v* tag → 正式 release
   release:
     needs: build
     if: needs.build.result == 'success'
@@ -169,17 +170,22 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p dist
-          # 优先发布压缩版 img.gz（小、上传稳）+ sha256；无则回退整 img
-          if [ -f bundle/owrt-a5e.img.gz ]; then
-            cp bundle/owrt-a5e.img.gz bundle/owrt-a5e.img.sha256 dist/
+          # 优先发布压缩版 img.tar.gz（标准归档、小、上传稳）+ sha256；无则回退整 img
+          if [ -f bundle/owrt-a5e.img.tar.gz ]; then
+            cp bundle/owrt-a5e.img.tar.gz bundle/owrt-a5e.img.sha256 dist/
           else
             cp bundle/owrt-a5e.img bundle/owrt-a5e.img.sha256 dist/
           fi
           ls -lh dist/
+          # 正式 tag → 同名 release（重跑才覆盖）；push/dispatch → 按 UTC 日期时分秒+run号
+          # 生成唯一 dev tag，每次一条独立 prerelease，不再固定 dev-build 反复覆盖。
           if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
             TAG="$GITHUB_REF_NAME"; TITLE="A5E OpenWrt image $GITHUB_REF_NAME"; EXTRA=""
           else
-            TAG="dev-build"; TITLE="A5E OpenWrt image dev-build"; EXTRA="--prerelease"
+            STAMP="$(date -u +%Y%m%d-%H%M%S)"
+            TAG="dev-${STAMP}-r${GITHUB_RUN_NUMBER}"
+            TITLE="A5E OpenWrt image dev-${STAMP} (run #${GITHUB_RUN_NUMBER})"
+            EXTRA="--prerelease"
           fi
           NOTES="**Automated image build** from commit \`${GITHUB_SHA}\` (run #${GITHUB_RUN_NUMBER})
 
