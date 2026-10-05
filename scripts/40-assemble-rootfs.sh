@@ -38,19 +38,26 @@ log "① 解开 openwrt 通用 rootfs →（全新临时装配目录，避开历
 ROOTFS_DIR=$(mktemp -d "$OWRT/.assemble.XXXXXX"); trap 'rm -rf "$ROOTFS_DIR"' EXIT
 tar -xf "$OWRT/$OWRT_TAR" -C "$ROOTFS_DIR"
 
-log "② 放入内核（boot/ + lib/modules + boot/dts）"
-mkdir -p "$ROOTFS_DIR/boot/dts"
+log "② 放入内核（boot/ + lib/modules + usr/lib/linux-image dtb）"
+mkdir -p "$ROOTFS_DIR/boot"
 cp "$VMLINUZ" "$ROOTFS_DIR/boot/vmlinuz-$KVER"
 [ -f "$INITRD_SRC" ] && cp "$INITRD_SRC" "$ROOTFS_DIR/boot/initrd.img-$KVER"
 # 清掉 openwrt 自带模块目录，只保留 A5E 内核的（版本必须与 vmlinuz 一致）
 rm -rf "$ROOTFS_DIR/lib/modules"; mkdir -p "$ROOTFS_DIR/lib/modules"
 cp -a "$MODULES_SRC" "$ROOTFS_DIR/lib/modules/$KVER"
-# 设备树：优先取 A5E 的 dtb，找不到就把目录里的 dtb 都拷上
-if [ -f "$DTB_SRC_DIR/$DTB" ]; then
-  cp "$DTB_SRC_DIR/$DTB" "$ROOTFS_DIR/boot/dts/"
+# 设备树：放进 /usr/lib/linux-image-<KVER>/allwinner/（Debian/Radxa 内核 deb 标准布局），
+# 匹配 extlinux 的 fdtdir /usr/lib/linux-image-<KVER>/（Radxa u-boot 按 compatible 到 allwinner/ 匹配）。
+# ❗ 之前拷到 /boot/dts 且按 maxdepth 1 找，kernel-actions 的 dtb 在 allwinner/ 子目录 → 拷空。
+DTB_DST="$ROOTFS_DIR/usr/lib/linux-image-$KVER/allwinner"
+mkdir -p "$DTB_DST"
+if [ -f "$DTB_SRC_DIR/allwinner/$DTB" ]; then
+  cp "$DTB_SRC_DIR/allwinner/$DTB" "$DTB_DST/"      # kernel-actions：在 allwinner/ 子目录
+elif [ -f "$DTB_SRC_DIR/$DTB" ]; then
+  cp "$DTB_SRC_DIR/$DTB" "$DTB_DST/"                # rsdk：KERNEL_DIR 顶层
 else
-  find "$DTB_SRC_DIR" -maxdepth 1 -name '*.dtb' -exec cp -t "$ROOTFS_DIR/boot/dts/" {} + 2>/dev/null || true
+  die "找不到 a5e dtb（$DTB）于 $DTB_SRC_DIR（allwinner/ 或顶层均无）"
 fi
+echo "   dtb → $DTB_DST/$DTB"
 
 log "②b 放入 u-boot（build-image 从 /usr/lib/u-boot/ copy-out 后写 SPL@LBA256）"
 mkdir -p "$ROOTFS_DIR/usr/lib/u-boot"
@@ -64,7 +71,7 @@ mkdir -p "$ROOTFS_DIR/boot/extlinux"
   echo "label l0"; echo "    menu title OpenWrt ${KVER} (${KSRC})"
   echo "    linux /boot/vmlinuz-${KVER}"
   [ -f "$INITRD_SRC" ] && echo "    initrd /boot/initrd.img-${KVER}"
-  echo "    fdtdir /boot/dts/"
+  echo "    fdtdir /usr/lib/linux-image-$KVER/"
   echo "    append root=PARTUUID=PLACEHOLDER ${APPEND_PARAMS}"
 } > "$ROOTFS_DIR/boot/extlinux/extlinux.conf"
 

@@ -45,6 +45,7 @@ openwrt-a5e-build/
 | 改动 | 实现 | 对应坑 | 状态 |
 |---|---|---|---|
 | 内核改用自编译版(kernel-actions) | `25-fetch-kernel.sh` | 上游 linux-aw2607 + fragment，bridge/fw4/tproxy **已 builtin** → 免 .ko.xz 转换与 bridge 预加载 | ★ 推荐 |
+| A5E dtb 放 `/usr/lib/linux-image-<KVER>/allwinner/` | `40-assemble` ② | 坑9：extlinux `fdtdir` 必须与 dtb 实际落点一致，否则 U-Boot 退回自带 fdt → 内核早期卡死 | ✅ |
 | 引导加 `coherent_pool=2M` | `40` 的 APPEND_PARAMS | 坑1 sunxi_mmc DMA 挂死 | ✅ |
 | `root=UUID=<真实fs UUID>` | `50` build-image 用 blkid 注入 | 坑2/3 引导链 | ✅ |
 | 短路 `mount_root` | `patches/40-mount-root-skip.sh` | 坑2 fstools 只认短PARTUUID/尾02 | ✅ |
@@ -52,7 +53,7 @@ openwrt-a5e-build/
 | 模块 `.ko.xz → .ko` | `patches/50-modules-ko-convert.sh` | 坑7 kmodloader 不支持 xz | ✅ |
 | 修 `modules.dep` 等路径 | `patches/50` | 坑7 modprobe 找不到 .ko | ✅ |
 | 删 `modules.*.bin` 缓存 | `patches/50` | 坑7 强制读文本 | ✅ |
-| bridge 预加载 init.d(START=15) | `custom/.../bridge-modules` + `40` ln S15 | 坑7 modprobe 依赖解析失灵→显式 insmod llc→stp→bridge | ✅待烧录验证 |
+| bridge 预加载 init.d(START=15) | 仅 rsdk 内核；kernel-actions 已 builtin → `40` 自动不装并删 | 坑7：rsdk 内核才需显式 insmod llc→stp→bridge | ✅(仅 rsdk 路径) |
 | firewall 放行 WAN 管理端口 | `patches/20-firewall-wan-access.sh` | LAN 修好前经 WAN 管理 SSH/LuCI | ✅ |
 | dropbear 监听所有接口 | `patches/30-dropbear-all-interfaces.sh` | 同上（默认只 lan） | ✅ |
 | inittab 加 `ttyAS0` login | `patches/10-inittab-ttyAS0.sh` | 坑8 串口进不了终端 | ✅ |

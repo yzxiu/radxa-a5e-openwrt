@@ -324,6 +324,56 @@ ip addr show br-lan                  # 应自动建好 192.168.1.1
 
 ---
 
+### 坑 9：kernel-actions 拼装下 dtb 找不到，内核用错 fdt 卡死
+
+**现象**（U-Boot 串口日志）：
+```
+Retrieving file: /usr/lib/linux-image-6.6.98-1-aw2607/...dtb
+** File not found /usr/lib/linux-image-6.6.98-1-aw2607/allwinner/sun55i-a527-cubie-a5e.dtb **
+Skipping fdtdir /usr/lib/linux-image-6.6.98-1-aw2607/ for failure retrieving dts
+## Flattened Device Tree blob at 7bf1f5b0
+   Booting using the fdt blob at 0x7bf1f5b0     ← 退回 U-Boot 自带 fdt
+```
+内核能 `Starting kernel` 但早期就卡住（用的不是内核包里的匹配 dtb）。
+
+**根因（两层叠加，都在 `scripts/40-assemble-rootfs.sh`）**：
+1. **dtb 拷贝路径错**：脚本② 往 `/boot/dts/` 拷，但用 `find -maxdepth 1` 找 `$DTB_SRC_DIR/*.dtb`；
+   而 kernel-actions release 解出的 a5e dtb 实际在 **`…/linux-image-<KVER>/allwinner/` 子目录**，顶层没有 → `boot/dts/` 拷成空。
+2. **fdtdir 与落点不一致**：`custom/rootfs/boot/extlinux/extlinux.conf` 的 overlay 把 `fdtdir` 指向
+   `/usr/lib/linux-image-<KVER>/`，但脚本从没往那儿拷 dtb → fdtdir 指空目录。
+   两者叠加 → dtb 彻底无处可寻。（手工拼装时第 3.3 节本来就是拷到 `usr/lib/linux-image/.../allwinner/`，
+   脚本化迁移时把目标改成了 `boot/dts` 却没同步改 fdtdir，埋下不一致。）
+
+**关键认知**：`50-build-image.sh` 里的 rsdk `build-image` 只 `sed` 替换 **`root=UUID`**，
+**不碰 `fdtdir`**。所以 extlinux 的 `fdtdir` 必须与 dtb 实际落点**人工保证一致**。
+
+**修复**：按 Debian/Radxa 内核 deb 标准布局，把 a5e dtb 放 `/usr/lib/linux-image-<KVER>/allwinner/`
+（匹配 custom 的 fdtdir），并区分两种内核源的 dtb 位置：
+```bash
+# scripts/40-assemble-rootfs.sh ② 内
+DTB_DST="$ROOTFS_DIR/usr/lib/linux-image-$KVER/allwinner"; mkdir -p "$DTB_DST"
+if [ -f "$DTB_SRC_DIR/allwinner/$DTB" ]; then   # kernel-actions：在 allwinner/ 子目录
+  cp "$DTB_SRC_DIR/allwinner/$DTB" "$DTB_DST/"
+elif [ -f "$DTB_SRC_DIR/$DTB" ]; then           # rsdk 提取：KERNEL_DIR 顶层
+  cp "$DTB_SRC_DIR/$DTB" "$DTB_DST/"
+else die "找不到 a5e dtb"; fi
+# 脚本③生成的 extlinux 里 fdtdir 也从 /boot/dts/ 改成 /usr/lib/linux-image-$KVER/（与 custom 一致）
+# 另：删掉旧的 mkdir boot/dts 后补回 mkdir -p "$ROOTFS_DIR/boot"（openwrt armsr rootfs 不预建 /boot）
+```
+
+**验证**（`./build.sh 40` 后离线查）：
+```bash
+tar -tf "$OWRT/openwrt-a5e-rootfs.tar" | grep "usr/lib/linux-image-.*/allwinner/sun55i-a527-cubie-a5e.dtb"
+# 成品 img：debugfs 确认同路径有 dtb + extlinux fdtdir 一致 + root=UUID==p3 superblock
+dd if=owrt-a5e.img of=/tmp/v.img bs=512 skip=679936 count=<partx -g -o SECTORS --nr3 owrt-a5e.img> status=none
+debugfs -R "stat /usr/lib/linux-image-$KVER/allwinner/sun55i-a527-cubie-a5e.dtb" /tmp/v.img
+```
+
+> 经验：改任何引导相关路径（dtb/cmdline/fdtdir）后，**必须离线 debugfs/tar 抽查实际落点**再烧；
+> U-Boot 找不到 dtb 会静默退回自带 fdt，看似能 `Starting kernel` 实则可能卡死或驱动不对。
+
+---
+
 ## 5. 最终配置（extlinux.conf）
 
 ```
