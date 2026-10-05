@@ -32,6 +32,11 @@ IMG="$WS/owrt-a5e.img"           # 最终镜像
 CUSTOM="$WORK/custom/rootfs"     # 整文件定制（overlay 源）
 PATCHES="$WORK/patches"          # sed 补丁脚本
 
+# ---- 打包执行环境 ----
+# guestfish 需 nix 版 libguestfs + /dev/kvm。host 若无，50 会自动借这个 rsdk
+# 容器（direnv/nix 环境）打包。容器名可用 RSDK_CONTAINER 覆盖。
+RSDK_CONTAINER=${RSDK_CONTAINER:-keen_heyrovsky}
+
 # ---- 镜像分区布局（rsdk build-image 的 GPT，用于离线 debugfs 编辑）----
 # sda1=config(vfat,32768-65535)  sda2=efi(vfat,65536-679935)  sda3=rootfs(ext4,679936-…)
 # ⚠ 扇区数随 rootfs 大小变，重 build 后务必用 sgdisk -i 3 / blkid 重新确认，勿硬依赖。

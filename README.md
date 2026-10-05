@@ -25,7 +25,7 @@ openwrt-a5e-build/
 │   ├── 25-fetch-kernel.sh       # ★日常内核来源：从 kernel-actions Release 下载 vmlinuz+modules
 │   ├── 30-fetch-openwrt.sh      # 下载 ImmortalWrt armsr rootfs（校验 sha256）
 │   ├── 40-assemble-rootfs.sh    # ★拼装：openwrt+A5E内核+全部定制 → rootfs.tar
-│   ├── 50-build-image.sh        # guestfish build-image → owrt-a5e.img
+│   ├── 50-build-image.sh        # guestfish 打包（有就地/无则借 rsdk 容器 direnv）→ owrt-a5e.img
 │   └── 90-offline-edit-image.sh # 调试工具：离线 debugfs 改成品镜像（秒级）
 ├── custom/rootfs/               # 整文件定制（overlay 直接覆盖到 rootfs）
 │   ├── boot/extlinux/extlinux.conf
@@ -65,7 +65,9 @@ openwrt-a5e-build/
 ## 复现步骤
 
 ```bash
-# 需在 rsdk devcontainer（KVM + binfmt/qemu + guestfish，50 步需 sudo）
+# 日常全链路（下载现成 Debian + 提取 + 拼装 + 打包，零 rsdk 编译）：
+#   • Debian 资产走 radxa-build release（DSRC=radxa-release，默认）
+#   • 打包步(50)需 guestfish：本环境无则自动借 RSDK_CONTAINER(direnv/nix) 完成
 cd openwrt-a5e-build
 # 日常构建（不跑 rsdk，需 kernel-actions release 已产出）：
 ./build.sh                 # KSRC=kernel-actions：25→30→40→50
@@ -85,6 +87,17 @@ debugfs -w -R 'set_inode_field /etc/foo mode 0100755' /tmp/rp.img   # debugfs wr
 # 烧录（确认 ROOTFS_LBA 后）：
 sudo dd if=../owrt-a5e.img of=/dev/sdX bs=4M conv=fsync status=progress && sync
 ```
+
+## 端到端验证（实测通过）
+
+`DSRC=radxa-release` + `KSRC=rsdk` 跑通 `15→20→40→50`，全程零 rsdk 编译：
+
+1. **15** 下载 `rsdk-t10 (cli)` 的 `rootfs.tar.xz`(557M，**sha512 校验 OK**) + `build-512-image`（与本地 `out/build-image` 分区/setup.sh 逐行一致）
+2. **20** 选择性提取 vmlinuz/initrd/dtb/u-boot + 892 模块（跳过 `/dev` mknod；兼容 usr-merge 的 `./usr/lib/modules`）
+3. **40** 临时目录拼装 → `openwrt-a5e-rootfs.tar`(263M)，`patches/50` 将 `.ko.xz→.ko`
+4. **50** 借 rsdk 容器 direnv 激活 guestfish，`build-image` 打包 23s → `owrt-a5e.img`
+
+离线 `debugfs` 抽查成品 img 六项定制全部落地：inittab `ttyAS0`、`bridge.ko`(非 .ko.xz)、firewall WAN 规则、dropbear 注释 lan、`mount_root` 短路、extlinux 含 `coherent_pool=2M`+`ttyAS0`，且 `root=UUID` 被 build-image 注入为**新随机值**（实证坑3）。
 
 ## 关键事实备忘
 

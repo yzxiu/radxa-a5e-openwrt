@@ -1,29 +1,46 @@
 #!/usr/bin/env bash
 # ============================================================================
-# 步骤5：用 rsdk 的 build-image(guestfish) 打成 GPT 镜像
+# 步骤5：打包 GPT 镜像（guestfish / rsdk build-image）
 # ----------------------------------------------------------------------------
-# build-image 会：建 GPT 3 分区 → tar-in 我们的 rootfs.tar → 用 blkid 生成
-#   新随机 UUID 注入 root=UUID → resize + setup.sh 写 u-boot(SPL@LBA256) → 扩容。
-# ⚠ 每次运行 rootfs 的 UUID 都变！所以别在别处硬编码 UUID；离线编辑前用
-#   blkid/debugfs 读真实值（见 90-offline-edit-image.sh 与 坑3）。
+# guestfish 依赖 nix 版 libguestfs + supermin appliance(/dev/kvm)，两种执行方式自动选：
+#   A) 当前环境已有 guestfish（直接身处 rsdk 容器）→ 就地跑
+#   B) host 无 guestfish（本机器常态）→ docker cp 产物进 RSDK_CONTAINER，direnv
+#        激活 nix 环境后 guestfish，再 docker cp 回
+# 打包用的 build-image 来自 out/（下载 t10 的 或 rsdk 本地生成的，分区逻辑一致）。
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.." && source scripts/00-lib.sh
-[ -f "$OUT/build-image" ]              || die "缺 $OUT/build-image（rsdk 生成，见 10）"
-[ -f "$OWRT/openwrt-a5e-rootfs.tar" ]  || die "缺 openwrt-a5e-rootfs.tar，先跑 40"
+RT="$OWRT/openwrt-a5e-rootfs.tar"; BI="$OUT/build-image"
+[ -f "$RT" ] || die "缺 $RT，先 ./build.sh 40"
+[ -f "$BI" ] || die "缺 $BI，先 ./build.sh 15(下载) 或 10(rsdk)"
 
-BUILD=$(mktemp -d); trap 'rm -rf "$BUILD"' EXIT
-cp "$OUT/build-image" "$BUILD/build-image"; chmod +x "$BUILD/build-image"
-# build-image 用相对路径读取 rootfs.tar
-ln -sf "$OWRT/openwrt-a5e-rootfs.tar" "$BUILD/rootfs.tar"
+pack_inplace() {   # 环境里有 guestfish，直接打
+  local B; B=$(mktemp -d); trap 'rm -rf "$B"' RETURN
+  cp "$BI" "$B/build-image"; chmod +x "$B/build-image"; ln -sf "$RT" "$B/rootfs.tar"
+  ( cd "$B" && guestfish -f ./build-image ) || die "guestfish 就地打包失败"
+  mv -f "$B/output_512.img" "$IMG"
+}
 
-log "guestfish -f build-image （需要 root：guestfish 直接写裸镜像）"
-cd "$BUILD"
-sudo guestfish -f ./build-image || die "build-image 失败（确认 guestfish 可用、有 root）"
+pack_container() { # 借 rsdk 容器打包
+  docker ps -q -f "name=^${RSDK_CONTAINER}$" | grep -q . || die "容器 ${RSDK_CONTAINER} 未运行"
+  local W=/tmp/a5e-build
+  log "docker cp → ${RSDK_CONTAINER}:${W}"
+  docker exec "$RSDK_CONTAINER" bash -lc "rm -rf $W && mkdir -p $W"
+  docker cp "$RT" "$RSDK_CONTAINER:$W/rootfs.tar"
+  docker cp "$BI" "$RSDK_CONTAINER:$W/build-image"
+  log "容器内 direnv(nix) 激活 + guestfish 打包（~20s）"
+  docker exec "$RSDK_CONTAINER" bash -lc "
+    cd /workspaces/rsdk && direnv allow >/dev/null 2>&1 || true
+    eval \"\$(direnv export bash)\"
+    cd $W && chmod +x build-image && guestfish -f ./build-image"
+  docker cp "$RSDK_CONTAINER:$W/output_512.img" "$IMG"
+  docker exec "$RSDK_CONTAINER" bash -lc "rm -rf $W"
+}
 
-log "搬回镜像 + 生成校验"
-mv -f output_512.img "$IMG" 2>/dev/null || cp -f output_512.img "$IMG"
+log "打包镜像（guestfish）"
+if command -v guestfish >/dev/null 2>&1; then log "有 guestfish → 就地"; pack_inplace
+else log "无 guestfish → 借容器 $RSDK_CONTAINER"; pack_container; fi
+
 sha256sum "$IMG" > "$IMG.sha256"
-echo "   → $IMG   ($(du -h "$IMG"|cut -f1))"
-echo "   sha: $(cat "$IMG.sha256")"
-echo "提示：新镜像 root=UUID 已被 build-image 改写，烧录前无需再改。"
+echo "   → $IMG ($(du -h "$IMG"|cut -f1))  sha=$(cut -c1-16 "$IMG.sha256")…"
+echo "提示：root=UUID 已由 build-image 用 blkid 注入新随机值（坑3，切勿硬编码）。"
