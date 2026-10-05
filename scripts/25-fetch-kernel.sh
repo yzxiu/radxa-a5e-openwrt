@@ -32,7 +32,7 @@ print(rel[0]["tag_name"] if rel else "")'
   REL_INFO=$(curl -fsSL "$API/tags/$TAG" | python3 -c '
 import sys, json
 r=json.load(sys.stdin)
-print(f"title={r.get(\"name\")!r} published={r.get(\"published_at\")!r} prerelease={r.get(\"prerelease\")!r} created_at={r.get(\"created_at\")!r}")'
+print("title=", repr(r.get("name")), "published=", repr(r.get("published_at")), "prerelease=", repr(r.get("prerelease")), "created_at=", repr(r.get("created_at")))'
   )
   log "取最新 release：$TAG"
   echo "  $REL_INFO"
