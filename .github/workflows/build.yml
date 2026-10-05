@@ -1,0 +1,121 @@
+name: Build A5E OpenWrt Image
+
+# 触发：
+#   - 手动 dispatch：可选填 deb_tag / deb_flavor / kernel_tag
+#   - push 到 main 且改了构建相关文件
+# 流程：15 下 Debian 资产 → 20 tar 提取 u-boot/initrd → 25 拉 kernel-actions 内核
+#       → 30 下 ImmortalWrt rootfs → 40 拼装 rootfs.tar → 50 guestfish 打包 img
+# 15/20/25/30/40 纯文件操作免 KVM；50 需 guestfish（无 /dev/kvm 走 TCG，慢但可用）。
+
+on:
+  workflow_dispatch:
+    inputs:
+      deb_tag:
+        description: 'radxa-build Debian release tag'
+        required: false
+        default: 'rsdk-t10'
+      deb_flavor:
+        description: 'cli / kde'
+        required: false
+        default: 'cli'
+      kernel_tag:
+        description: 'kernel-actions release (latest 或具体 v*)'
+        required: false
+        default: 'latest'
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'custom/**'
+      - 'patches/**'
+      - 'build.sh'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: write
+
+env:
+  DEBIAN_FRONTEND: noninteractive
+  LIBGUESTFS_BACKEND: direct          # 直连 qemu，不经 libvirtd（Actions 无 libvirtd）
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            curl ca-certificates xz-utils cpio rsync python3 tar coreutils \
+            libguestfs-tools qemu-utils qemu-system-x86
+          echo "guestfish: $(command -v guestfish)"; guestfish --version
+
+      # ---- 15→40：下载 + 提取 + 拼装，全部纯文件操作，无 KVM 依赖 ----
+      - name: 15 fetch radxa Debian assets (build-image + rootfs.tar.xz)
+        env:
+          DEB_TAG: ${{ inputs.deb_tag || 'rsdk-t10' }}
+          DEB_FLAVOR: ${{ inputs.deb_flavor || 'cli' }}
+        run: bash scripts/15-fetch-radxa-debian.sh
+
+      - name: 20 extract kernel assets from Debian rootfs (u-boot/initrd)
+        run: bash scripts/20-extract-kernel.sh
+
+      - name: 25 fetch kernel-actions custom kernel (vmlinuz + modules + dtb)
+        env:
+          KERNEL_ACTIONS_TAG: ${{ inputs.kernel_tag || 'latest' }}
+        run: bash scripts/25-fetch-kernel.sh
+
+      - name: 30 fetch ImmortalWrt armsr rootfs
+        run: bash scripts/30-fetch-openwrt.sh
+
+      - name: 40 assemble OpenWrt rootfs.tar
+        run: bash scripts/40-assemble-rootfs.sh
+
+      - name: 校验拼装产物（dtb 落点 / bridge 无 workaround）
+        run: |
+          set -euo pipefail
+          T="../owrt/openwrt-a5e-rootfs.tar"
+          [ -f "$T" ] || { echo "缺 rootfs.tar"; exit 1; }
+          tar -tf "$T" | grep -E "usr/lib/linux-image-[^/]+/allwinner/sun55i-a527-cubie-a5e\.dtb" \
+            && echo "✓ a5e dtb 在 usr/lib/linux-image/allwinner/" || { echo "✗ dtb 缺"; exit 1; }
+          if tar -tf "$T" | grep -q "etc/init.d/bridge-modules"; then echo "✗ 不该有 bridge workaround"; exit 1; else echo "✓ 无 bridge workaround（kernel-actions 已 builtin）"; fi
+
+      - name: upload rootfs.tar (milestone artifact)
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-a5e-rootfs
+          path: ../owrt/openwrt-a5e-rootfs.tar
+          retention-days: 14
+
+      # ---- 50：guestfish 打包（无 KVM 走 TCG）----
+      - name: 50 build image (guestfish)
+        run: |
+          # supermin 首次建 appliance 需可访问主机包；direct backend 用已装 qemu
+          bash scripts/50-build-image.sh
+
+      - name: 校验成品镜像
+        run: |
+          set -euo pipefail
+          IMG="../owrt-a5e.img"
+          [ -f "$IMG" ] || { echo "✗ 没产出 img"; exit 1; }
+          ls -lh "$IMG"; cat "../owrt-a5e.img.sha256"
+          # 分区表可能随 shrink 变，动态读 p3
+          S=$(partx -g -o START --nr 3 "$IMG"); N=$(partx -g -o SECTORS --nr 3 "$IMG")
+          dd if="$IMG" of=/tmp/v.img bs=512 skip="$S" count="$N" status=none
+          echo "-- dtb 在 img 里 --"
+          guestfish --ro -a /dev/null run : echo ok >/dev/null 2>&1 || true
+          debugfs -R "stat /usr/lib/linux-image-*/allwinner/sun55i-a527-cubie-a5e.dtb" /tmp/v.img 2>/dev/null | grep -E "Inode|Size" && echo "✓ dtb 落地"
+          rm -f /tmp/v.img
+
+      - name: upload final image
+        uses: actions/upload-artifact@v4
+        with:
+          name: owrt-a5e-img
+          path: |
+            ../owrt-a5e.img
+            ../owrt-a5e.img.sha256
+          retention-days: 30
+          if-no-files-found: error
