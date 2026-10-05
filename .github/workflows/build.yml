@@ -53,6 +53,26 @@ jobs:
             libguestfs-tools qemu-utils qemu-system-x86
           echo "guestfish: $(command -v guestfish)"; guestfish --version
 
+      - name: guestfish appliance 冒烟诊断（定位 supermin 失败原因，不中断）
+        env:
+          LIBGUESTFS_BACKEND: direct
+          LIBGUESTFS_DEBUG: "1"
+        continue-on-error: true
+        run: |
+          {
+            echo "uname -r      = $(uname -r)"
+            echo "-- host kernel 文件 --"
+            ls -l "/lib/modules/$(uname -r)" 2>&1 | head -3
+            ls -l /boot/vmlinuz-* 2>&1 | head
+            echo "-- qemu / supermin --"
+            command -v qemu-system-x86_64 qemu-system-arm; command -v supermin
+            dpkg -l | grep -iE "linux-image|qemu-system|supermin" | head
+            echo "-- guestfish run（会打印 supermin 具体缺什么）--"
+            guestfish -a /dev/null run
+          } 2>&1 | tee /tmp/lfsmoke.log | grep -iE "uname|supermin|kernel|error|missing|appliance|/boot|vmlinuz|qemu" | head -50
+          echo "=== 冒烟关键行已进 summary ==="
+          grep -iE "supermin|kernel|error|missing|/boot/vmlinuz" /tmp/lfsmoke.log | tail -25 >> "$GITHUB_STEP_SUMMARY" || true
+
       # ---- 15→40：下载 + 提取 + 拼装，全部纯文件操作，无 KVM 依赖 ----
       - name: 15 fetch radxa Debian assets (build-image + rootfs.tar.xz)
         env:
@@ -94,9 +114,10 @@ jobs:
 
       # ---- 50：guestfish 打包（无 KVM 走 TCG）----
       - name: 50 build image (guestfish)
+        env:
+          LIBGUESTFS_DEBUG: "1"
         run: |
-          # supermin 首次建 appliance 需可访问主机包；direct backend 用已装 qemu
-          bash scripts/50-build-image.sh
+          bash scripts/50-build-image.sh 2>&1 | tail -120
 
       - name: 校验成品镜像
         run: |
