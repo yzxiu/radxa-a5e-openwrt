@@ -13,12 +13,13 @@
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.." && source scripts/00-lib.sh
-[ -f "$OUT/rootfs.tar" ] || die "缺 $OUT/rootfs.tar，请先跑 10-build-debian.sh"
+[ -f "$OUT/rootfs.tar" ] || [ -f "$OUT/rootfs.tar.xz" ] || die "缺 out/rootfs.tar(.xz)，先跑 15-fetch-radxa-debian.sh 或 10-build-debian.sh"
+ROOTFS_TGZ="$OUT/rootfs.tar"; [ -f "$ROOTFS_TGZ" ] || ROOTFS_TGZ="$OUT/rootfs.tar.xz"
 
 mkdir -p "$KERNEL_DIR"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 log "解开 Debian rootfs.tar → 临时目录，定位内核资产"
-tar -xf "$OUT/rootfs.tar" -C "$TMP"
+tar -xf "$ROOTFS_TGZ" -C "$TMP"
 
 # vmlinuz / initrd
 cp "$TMP/boot/vmlinuz-$KVER"            "$KERNEL_DIR/" 2>/dev/null || die "无 vmlinuz-$KVER"

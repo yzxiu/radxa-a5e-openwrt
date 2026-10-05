@@ -9,6 +9,7 @@
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.." && source scripts/00-lib.sh
+[ "$DSRC" = radxa-release ] && { log "DSRC=radxa-release：跳过 rsdk build（用 15-fetch-radxa-debian.sh 下现成 Debian）"; exit 0; }
 
 log "rsdk build $BOARD  （--test-repo / -T，走 a527-trixie-test 源）"
 # 在 rsdk 源码目录（rsdk-src/rsdk）内执行：

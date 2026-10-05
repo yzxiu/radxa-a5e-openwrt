@@ -38,6 +38,17 @@ PATCHES="$WORK/patches"          # sed 补丁脚本
 ROOTFS_LBA=${ROOTFS_LBA:-679936}
 ROOTFS_SECT=${ROOTFS_SECT:-998433}
 
+# ---- Debian 资产来源 DSRC（u-boot/initrd/build-image/rootfs，步骤20/50 的输入）----
+# radxa-release（默认，免 rsdk）：从 radxa-build release 下载现成 Debian rootfs+build-image。
+# rsdk：本地 rsdk build 生成 out/（需 devcontainer）。
+DSRC=${DSRC:-radxa-release}
+RADXA_REPO=${RADXA_REPO:-radxa-build/radxa-cubie-a5e}
+DEB_TAG=${DEB_TAG:-rsdk-t10}
+DEB_FLAVOR=${DEB_FLAVOR:-cli}                          # cli / kde
+DEB_V=$(echo "$DEB_TAG" | sed 's/rsdk-//')            # t10
+DEB_BASE=radxa-cubie-a5e_trixie_${DEB_FLAVOR}_${DEB_V}
+DEB_REL="https://github.com/$RADXA_REPO/releases/download/$DEB_TAG"
+
 # ---- 内核来源 KSRC -----------------------------------------------------------
 # kernel-actions（默认，日常构建，不碰 rsdk）：从 yzxiu/radxa-a5e-openwrt-kernel 的
 #   GitHub Release 下载 vmlinuz(未压缩) + modules-and-dtb.tar(.ko 已展开、dep 已修、
