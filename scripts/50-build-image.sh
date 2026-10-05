@@ -14,9 +14,17 @@ RT="$OWRT/openwrt-a5e-rootfs.tar"; BI="$OUT/build-image"
 [ -f "$RT" ] || die "缺 $RT，先 ./build.sh 40"
 [ -f "$BI" ] || die "缺 $BI，先 ./build.sh 15(下载) 或 10(rsdk)"
 
+# build-image 里 tar-in 引用的 rootfs 文件名因来源而异：
+#   本地 rsdk 自建版 = rootfs.tar；radxa release 下载版 = <DEB_BASE>.rootfs.tar。
+# 动态提取该名字，软链我们的 openwrt rootfs 到它 → 两版通吃。
+RN=$(grep -oE '[^"[:space:]]+\.rootfs\.tar' "$BI" | head -1)
+[ -n "$RN" ] || RN="rootfs.tar"
+export RN
+echo "   build-image 引用的 rootfs 名：$RN"
+
 pack_inplace() {   # 环境里有 guestfish，直接打
   local B; B=$(mktemp -d); trap 'rm -rf "$B"' RETURN
-  cp "$BI" "$B/build-image"; chmod +x "$B/build-image"; ln -sf "$RT" "$B/rootfs.tar"
+  cp "$BI" "$B/build-image"; chmod +x "$B/build-image"; ln -sf "$RT" "$B/$RN"
   ( cd "$B" && guestfish -f ./build-image ) || die "guestfish 就地打包失败"
   mv -f "$B/output_512.img" "$IMG"
 }
@@ -26,7 +34,7 @@ pack_container() { # 借 rsdk 容器打包
   local W=/tmp/a5e-build
   log "docker cp → ${RSDK_CONTAINER}:${W}"
   docker exec "$RSDK_CONTAINER" bash -lc "rm -rf $W && mkdir -p $W"
-  docker cp "$RT" "$RSDK_CONTAINER:$W/rootfs.tar"
+  docker cp "$RT" "$RSDK_CONTAINER:$W/$RN"
   docker cp "$BI" "$RSDK_CONTAINER:$W/build-image"
   log "容器内 direnv(nix) 激活 + guestfish 打包（~20s）"
   docker exec "$RSDK_CONTAINER" bash -lc "

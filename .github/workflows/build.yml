@@ -57,8 +57,9 @@ jobs:
       - name: setup nix (提供 libguestfs-with-appliance)
         uses: DeterminateSystems/nix-installer-action@main
 
-      - name: warm nix cache
-        uses: DeterminateSystems/magic-nix-cache-action@main
+      # 不用 magic-nix-cache：nixpkgs 的 libguestfs-with-appliance/qemu 都有
+      # cache.nixos.org 的 substitute（nix-installer 自带），直接拉即可；
+      # magic-nix-cache 会把下载到的 store 路径 import 进 Actions 缓存、白白撑大。
 
       - name: guestfish(nix) 冒烟（自带 fixed appliance，应能直接 run）
         run: |
