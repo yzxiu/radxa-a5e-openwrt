@@ -5,6 +5,9 @@
 
 > 详细调试过程与踩坑分析见 [`docs/OpenWrt-A5E-制作记录.md`](docs/OpenWrt-A5E-制作记录.md)。
 > 本仓库记录**如何复现**这套镜像的全部改动，调试过程中所有定制都在 `scripts/ custom/ patches/` 里落成源码。
+>
+> 专题：**apk 包管理**（chroot 装包、wpad 变体替换、权限/binfmt 坑、可复现性）
+> 单独成篇 → [`docs/apk-包管理-chroot安装-记录与思考.md`](docs/apk-包管理-chroot安装-记录与思考.md)。
 
 ## 方案（方案C）
 
@@ -37,7 +40,8 @@ openwrt-a5e-build/
 │   ├── 30-dropbear-all-interfaces.sh
 │   ├── 40-mount-root-skip.sh
 │   └── 50-modules-ko-convert.sh
-└── docs/OpenWrt-A5E-制作记录.md
+├── docs/OpenWrt-A5E-制作记录.md
+└── docs/apk-包管理-chroot安装-记录与思考.md   # apk/chroot 专题（含推理过程）
 ```
 
 ## 改动总清单（定制点 → 实现位置 → 为什么）
