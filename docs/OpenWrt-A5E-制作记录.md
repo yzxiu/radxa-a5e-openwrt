@@ -385,15 +385,40 @@ kernel 仓把 AIC8800 驱动整体 builtin 后（`vendor/aic8800`，异步线程
 | 固件 | `/lib/firmware/aic8800_fw/SDIO/aic8800D80/`（15 个文件） | 驱动用 **`filp_open` 直读**（不是 `request_firmware`），路径写死在 `CONFIG_AIC_FW_PATH`。内核里的异步初始化线程就是靶轮询这个目录判断“真 rootfs 挂好了”，目录不存在 → **它就一直等，一条日志都不打** |
 | 用户态包 | `wifi-scripts`（提供 `/sbin/wifi` + netifd 的 `mac80211.sh`）、`iw` | ImmortalWrt 25.12 把这些从 base-files 拆出去了，armsr 通用 rootfs 里没有 → `wifi config`/`wifi up` 全是 `not found`，netifd 根本没有无线 handler |
 | wpad 降权 | `/etc/capabilities/wpad.json` | procd 按它把 wpad 降到 `network` 用户 + 受限 capability 集，hostapd 在非 root 下**注册不上 ubus 对象** → `ubus wait_for hostapd` 永久挂住，AP 起了也用不了 |
+| wpad 变体 | 基础 rootfs 预装 `wpad-mesh-mbedtls`（**minimal**，没编 802.11ac/ax） | 想开 5G 时 hostapd 对 `ieee80211ac`/`vht_capab`/`ieee80211ax`/`he_oper_chwidth` 全报 `unknown configuration item` → `add_iface failed`；而 **ubus 仍报 `up:true`**，只有 `iw dev` 里 `phy0-ap0` **没有 channel 行**才看得出根本没在发 |
 
-外加一层配置陷阱：`wifi config` 自动探测会把这颗 **2.4G 单频**芯片猜成
-`band=5g / channel=36 / htmode=HE80`，hostapd 直接起不来。板上实测可用组合是
-`2g / 6 / HT20`，所以预置 `/etc/config/wireless`，不让它猜。
+
+#### 更正：这颗芯片是**双频**的，不是 2.4G 单频
+
+早期误判 AIC8800D80 是"2.4G 单频"，于是把配置锁成 `2g/6/HT20`，还反过来把
+`wifi config` 探测出的 `5g/36/HE80` 当成"猜错了"。板上 `iw phy phy0 info` 实测：
+
+- **Band 1(2.4G) + Band 2(5G) 都有**，5G 覆盖信道 **36–165**（每个 20 dBm）
+- HE PHY Capabilities 含 80MHz，`HE Iftypes: managed, AP`
+- VHT 最高 **390 Mbps** = 2 流 × 195 → **2×2**
+- 但只暴露 **1 个 phy** → 单射频，**2.4G 与 5G 不能同时开**，只能二选一
+
+所以 `wifi config` 当初探测成 `5g/36/HE80` **是对的**；hostapd 起不来的真正原因是
+上表最后一行——**wpad 是 minimal 变体**。换成 full 版 `wpad-mbedtls` 后 `5g/36/HE80`
+直接 AP-ENABLED。冷启动实测：`iw dev` → `channel 36 (5180 MHz), width: 80 MHz,
+center1: 5210 MHz`；hostapd 配置里 `hw_mode=a`、`ieee80211ac=1`、`ieee80211ax=1`、
+`he_oper_chwidth=1`、`he_oper_centr_freq_seg0_idx=42`；配置错误 0 条；`phy0-ap0`
+已桥进 br-lan；`ubus` 报 `up:true / pending:false / retry_setup_failed:false`。
+信道 36 是**非 DFS** 信道（52–144 要 60s CAC 雷达检测），所以默认就用它。
+
+⚠ 换 wpad 有两个坑，都在板上踩过：
+1. apk 不允许两个 provide `hostapd` 的包共存，`apk add wpad-mbedtls` 只打印
+   conflicts 分析就返回、**退出码还不报错** → 必须先 `apk del wpad-mesh-mbedtls`。
+2. 换包不会重启已在跑的 hostapd（`wifi down/up` 也不重启守护进程，netifd 是通过
+   ubus `hostapd.add_iface` 去找**老进程**），实测老进程的 `/proc/<pid>/exe` 显示
+   `/usr/sbin/wpad (deleted)` → 必须 `/etc/init.d/wpad restart` 才生效。
+   构建期装包不受影响（那时还没进程）。
 
 **固化位置**：固件 `20-extract-kernel.sh` 提取 + `40-assemble` ②c 落盘；包 `40` ③b
 （chroot+apk，qemu-user 跑 aarch64，因为 `wifi-scripts`/`iw` 的 post-install 脚本
-必须在目标环境里执行）；wpad `patches/60-wpad-no-drop-privilege.sh`；配置
-`custom/rootfs/etc/config/wireless`。CI 里加了 9 条断言卡住这些（缺任一项就红），
+必须在目标环境里执行）；wpad 降权 `patches/60-wpad-no-drop-privilege.sh`；wpad 换 full 版 `40` ③b
+（先 `apk del` 再 `apk add`，装完查包 DB 确认）；配置
+`custom/rootfs/etc/config/wireless`（默认 5g/36/HE80）。CI 里加了 12 条断言卡住这些（缺任一项就红），
 因为这类失败的共同特征就是**不报错**。
 
 **顺带查清但不修的两件事**：

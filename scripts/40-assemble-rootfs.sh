@@ -172,8 +172,17 @@ ensure_aarch64_chroot() {
 }
 ensure_aarch64_chroot \
   || die "chroot 里跑不了 aarch64（上方有诊断）——需 qemu-user + binfmt_misc 就绪"
+# 先卸掉基础 rootfs 预装的 wpad 变体（wpad-mesh-mbedtls = minimal，无 802.11ac/ax），
+# 再装 full 版。apk 不让两个 provide hostapd 的包共存，而且冲突时只打印分析、
+# 退出码还不报错（实测），所以必须显式 del，并在装完后校验包 DB。
+INSTALLED=$($SUDO chroot "$ROOTFS_DIR" /usr/bin/apk info 2>/dev/null || true)
+for v in $(printf '%s\n' "$INSTALLED" | grep -E '^wpad-' || true); do
+  [ "$v" = "$WIFI_WPAD_PKG" ] && continue
+  echo "   - 卸掉 $v（minimal 变体，无 802.11ac/ax）"
+  $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk del "$v" >/dev/null 2>&1 || true
+done
 # 部分 feed（amlogic/video）在本 target 不存在，apk 会刷 WARNING 但不影响安装
-$SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add $WIFI_PKGS \
+$SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add "$WIFI_WPAD_PKG" $WIFI_PKGS \
   || die "chroot apk add 失败（查 qemu-user-static/binfmt 是否可用、网络是否通）"
 for d in dev sys proc; do
   $SUDO umount "$ROOTFS_DIR/$d" 2>/dev/null || $SUDO umount -l "$ROOTFS_DIR/$d" 2>/dev/null || true
@@ -184,7 +193,12 @@ $SUDO rm -rf "$ROOTFS_DIR/tmp/cache" "$ROOTFS_DIR/tmp/log" "$ROOTFS_DIR/etc/apk/
 for f in /sbin/wifi /usr/sbin/iw /lib/netifd/wireless/mac80211.sh; do
   [ -e "$ROOTFS_DIR$f" ] || die "包装上了但缺 $f（WIFI_PKGS 不对？）"
 done
-echo "   ✓ /sbin/wifi + /usr/sbin/iw + mac80211.sh 就位"
+# wpad 必须真的换成了 full 版：apk 遇到 conflicts 会静默什么都不做（上面已处理，
+# 但这里再卡一道）—— 否则 5G 会在板上静默起不来，而 CI 全绿。
+INSTALLED=$($SUDO chroot "$ROOTFS_DIR" /usr/bin/apk info 2>/dev/null || true)
+printf '%s\n' "$INSTALLED" | grep -qx "$WIFI_WPAD_PKG" \
+  || die "wpad 未换成 $WIFI_WPAD_PKG（当前：$(printf '%s\n' "$INSTALLED" | grep -E '^wpad' | tr '\n' ' ')）"
+echo "   ✓ /sbin/wifi + /usr/sbin/iw + mac80211.sh + $WIFI_WPAD_PKG 就位"
 
 log "④ 应用整文件定制 custom/rootfs/*（overlay 覆盖）"
 cp -a "$CUSTOM/." "$ROOTFS_DIR/" 2>/dev/null || true

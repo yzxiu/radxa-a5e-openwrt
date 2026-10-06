@@ -1,10 +1,22 @@
-# 预置无线配置（板载 AIC8800D80）
+# 预置无线配置（板载 AIC8800D80，SDIO，单射频双频）
 #
-# 为什么不让 `wifi config` 自动生成：它会探测成 band=5g / channel=36 / htmode=HE80，
-# 而 AIC8800D80 是 **2.4G 单频**芯片、band1 上也不支持 HE —— 生成出来的配置
-# hostapd 起不来（iface 无法进 ENABLED）。板上实测可用的组合就是 2g/6/HT20。
+# 【更正】早先误判这颗芯片是"2.4G 单频"，所以锁了 2g/6/HT20。板上 `iw phy phy0 info`
+# 实测：**Band 1(2.4G) + Band 2(5G) 都有**，5G 覆盖信道 36–165（每个 20 dBm），
+# HE PHY Capabilities 含 80MHz、HE Iftypes 含 AP、VHT 最高 390 Mbps（= 2 流 × 195）。
+# 但只暴露 **1 个 phy**，是单射频 → 2.4G 与 5G **不能同时开**，只能二选一。
+# 默认选 5G/HE80（吞吐远高于 2.4G/HT20）。想改回 2.4G 就把下面三行换成
+#   band '2g' / channel '6' / htmode 'HT20'
 #
-# option path 必须与实际 SDIO 拓扑一致（板上 `iw phy` / `uci show wireless` 核对过）：
+# ⚠ 5G 必须配 full 版 wpad（见 00-lib.sh 的 WIFI_WPAD_PKG）：基础 rootfs 预装的
+#   wpad-mesh-mbedtls 是 minimal 版，没编 802.11ac/ax，hostapd 会对 ieee80211ac /
+#   vht_capab / ieee80211ax / he_oper_chwidth 全报 unknown configuration item，
+#   add_iface 直接失败——而 ubus 还报 up:true，只有 `iw dev` 里 phy0-ap0 没有
+#   channel 行才看得出真相。
+#
+# 信道 36 是**非 DFS** 信道，起来最快最稳；52–144 需要雷达检测（60s CAC），
+# 且本驱动的 regdomain 是自带的 permissive 规则（custregd=true），别指望 country 生效。
+#
+# option path 必须与实际 SDIO 拓扑一致（板上核对过）：
 #   platform/soc@3000000/4021000.sdmmc/mmc_host/mmc2/mmc2:390b/mmc2:390b:1
 #
 # ⚠ 出厂默认是开放 AP（encryption none，SSID=ImmortalWrt）。首次上线请立即在
@@ -13,9 +25,9 @@
 config wifi-device 'radio0'
 	option type 'mac80211'
 	option path 'platform/soc@3000000/4021000.sdmmc/mmc_host/mmc2/mmc2:390b/mmc2:390b:1'
-	option band '2g'
-	option channel '6'
-	option htmode 'HT20'
+	option band '5g'
+	option channel '36'
+	option htmode 'HE80'
 	option country 'CN'
 
 config wifi-iface 'default_radio0'

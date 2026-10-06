@@ -89,6 +89,19 @@ AIC_FW_DIR="$OWRT/aic-firmware/$AIC_FW_SUB"      # 20 步提取后的落点
 # OpenWrt 的 wireless-regdb 只给 regulatory.db、不给 regulatory.db.p7s，装了照样被拒。
 WIFI_PKGS=${WIFI_PKGS:-iw wifi-scripts}
 
+# ⚠ 必须把基础 rootfs 预装的 wpad 换成 full 版，否则 5G 起不来。
+# 预装的是 wpad-mesh-mbedtls，它自己的描述就是 "minimal ... (with 802.11s mesh and SAE)"，
+# 编译时**没开 CONFIG_IEEE80211AC / CONFIG_IEEE80211AX** —— 板上实测 hostapd 对
+# `ieee80211ac` / `vht_capab` / `vht_oper_chwidth` / `ieee80211ax` / `he_oper_chwidth`
+# 全部报 "unknown configuration item"（HE80 时 40+ 条、VHT80 时 4 条）→
+# `hostapd.add_iface failed` → iw dev 里 phy0-ap0 **没有 channel 行**（根本没在发），
+# 而 ubus 却报 up:true —— 典型假象，必须用 iw dev 才算数。
+# wpad-mbedtls 描述是 "full featured"，实测 ac+ax 都在，HE80/ch36 能 AP-ENABLED。
+# 注意：apk 不允许两个 provide hostapd 的包共存，`apk add wpad-mbedtls` 只会打印
+# conflicts 分析然后什么都不做（退出码还不报错），**必须先 apk del 再 add**。
+# 另：换了 wpad 后 apk 会重新落地 /etc/capabilities/wpad.json，patches/60 会再改名。
+WIFI_WPAD_PKG=${WIFI_WPAD_PKG:-wpad-mbedtls}
+
 # ---- 引导参数（extlinux append；root=UUID 由 build-image 用 blkid 注入，勿硬编码）----
 APPEND_PARAMS="console=ttyAS0,115200n8 earlyprintk=sunxi-uart,0x2500000 rootwait clk_ignore_unused mac_addr=\${mac} mac1_addr=\${mac1} loglevel=4 rw earlycon consoleblank=0 console=tty1 coherent_pool=2M irqchip.gicv3_pseudo_nmi=0"
 

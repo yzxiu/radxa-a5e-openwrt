@@ -105,7 +105,7 @@ jobs:
       - name: 40 assemble OpenWrt rootfs.tar
         run: bash scripts/40-assemble-rootfs.sh
 
-      - name: 校验拼装产物（dtb / bridge / WiFi 四件套）
+      - name: 校验拼装产物（dtb / bridge / WiFi 六件套）
         run: |
           set -euo pipefail
           T="../owrt/openwrt-a5e-rootfs.tar"
@@ -123,6 +123,11 @@ jobs:
           chk  "etc/capabilities/wpad\.json\.disabled"    "wpad 降权已禁用"
           nchk "etc/capabilities/wpad\.json$"             "wpad.json 未残留（否则 hostapd 注册不上 ubus）"
           chk  "etc/config/wireless$"                     "/etc/config/wireless 已预置"
+          chk  "lib/apk/packages/wpad-mbedtls\.list"       "wpad 是 full 版（含 802.11ac/ax）"
+          nchk "lib/apk/packages/wpad-mesh-"               "无 minimal 版 wpad 残留（那个没 ac/ax，5G 起不来）"
+          # 频段要从 tar 里把文件抽出来看（tar -tf 只有文件名）—— 默认必预置 5G
+          BAND=$(tar -xOf "$T" ./etc/config/wireless 2>/dev/null | grep -oE "option band '[0-9]g'" | head -1)
+          [ "$BAND" = "option band '5g'" ] && echo "✓ 默认频段 5g" || { echo "✗ 默认频段不是 5g（得到：${BAND:-空}）"; exit 1; }
           rm -f "$L"
 
       - name: stage rootfs.tar into workspace
