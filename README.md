@@ -66,6 +66,8 @@ openwrt-a5e-build/
 | **禁用 wpad 降权** | `patches/60-wpad-no-drop-privilege.sh` | 坑10：`/etc/capabilities/wpad.json` 让 procd 把 wpad 降到 network 用户 → hostapd 注册不上 ubus 对象 → `ubus wait_for hostapd` 永久挂住 | ✅ |
 | **wpad 换 full 版** | `40-assemble` ③b（先 `apk del wpad-mesh-mbedtls` 再 `apk add wpad-mbedtls`） | 坑10：预装的 mesh 版是 **minimal**，没编 802.11ac/ax → 5G 时 hostapd 报 40+ 条 `unknown configuration item`、`add_iface failed`，而 ubus 还假报 `up:true` | ✅ |
 | **预置 `/etc/config/wireless`（默认 5G）** | `custom/rootfs/etc/config/wireless` | 坑10：芯片是**单射频双频**（1 个 phy，2.4G/5G 不能同时开），5G 覆盖 ch36–165、2×2、HE80；默认锁 `5g/36/HE80`（36 是非 DFS 信道，起来最快；板上冷启动实测 AP-ENABLED） | ✅ || **禁用 plymouth**（开机占 console→askfirst 失败） | 未做 | 坑8 根治 | ⚠ 待办 |
+| **不设 `option country`** + `country_ie='0'`/`doth='0'` | `custom/rootfs/etc/config/wireless` | 坑11-A：phy0 是 `self-managed`（驱动 `custregd` 默认 true），`iw reg get` 永远 `country 00`；而 hostapd 见到 `country_code=` 就进 `COUNTRY_UPDATE` 等 REG_CHANGE、**1 秒超时后 AP-DISABLED** | ✅ |
+| **修 `find_reusable_wdev` 误判** | `patches/70-wdev-reusable-wdev-fix.sh` | 坑11-B：它把 `operstate=="down"` 当"接口空闲"，而刚启用的 AP 在网桥端口 settling 期间正是 down → 被 `RTM_SETLINK` **改名成 sta0**（dmesg `renamed from phy0-ap0 (while UP)`），AP 凭空消失、hostapd 无限刷 `Failed to set beacon parameters`，而 ubus 仍报 `up:true`。仅 fullmac 驱动会走到（AIC8800 是 fullmac） | ✅ |
 | **Ctrl+C(SIGINT) 不生效**（top 退不出） | 未查 | 坑8 遗留 | ⚠ 待办 |
 
 > 引导参数里 **`root=` 绝不能硬编码**：每次跑 `50-build-image.sh` 都用 blkid 生成

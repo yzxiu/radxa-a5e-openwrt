@@ -438,6 +438,133 @@ center1: 5210 MHz`；hostapd 配置里 `hw_mode=a`、`ieee80211ac=1`、`ieee8021
   **只有这 1 个**冲突，且挂 root 所需的 `MMC_BLOCK`/`EXT4_FS`/`JBD2` 全已 builtin，
   那 46MB 未压缩 cpio 每次开机白解包。属可选优化（精简 initrd），非阻塞。
 
+### 坑 11：AP + STA 同开时，重启后 AP 会消失（要在 LuCI 上禁用再启用才好）
+
+**现象**：`/etc/config/wireless` 里同时配 AP（`default_radio0`，桥进 br-lan）和 STA
+（`wifinet1`，连上级路由）时，冷启动后：
+
+```
+iw dev              → 只有 phy0-sta0，没有 phy0-ap0
+brctl show br-lan   → 只有 eth0
+logread             → hostapd: Failed to set beacon parameters   每 6 秒一次，无限刷
+ubus ... wireless   → "up": true, "retry_setup_failed": false    ← 又是假象
+```
+
+在 LuCI 上把 AP 禁用再启用，两个就都正常了。**单开 AP 不受影响**，所以这个问题
+只有在 AP+STA 同开时才暴露。
+
+查下来是**两个独立的根因**，必须都修：
+
+#### 根因 A：`option country` 让 hostapd 卡在 `COUNTRY_UPDATE` 超时
+
+驱动 `rwnx_mod_params.c` 里 `COMMON_PARAM(custregd, true, true)` 默认为真，phy0 被打上
+`REGULATORY_WIPHY_SELF_MANAGED`：
+
+```
+$ iw reg get
+phy#0 (self-managed)
+country 00: DFS-UNSET          ← 设了 country 'CN' 也不会变成 CN
+```
+
+而 hostapd 只要看到 `country_code=`，就会进 `COUNTRY_UPDATE` 等内核的 REG_CHANGE 事件；
+self-managed 的 phy 不给它期待的那个事件 → **等 1 秒超时**：
+
+```
+hostapd: phy0-ap0: interface state UNINITIALIZED->COUNTRY_UPDATE
+hostapd: phy0-ap0: AP-DISABLED                       ← 恰好 1 秒后
+hostapd: hostapd_free_hapd_data: Interface phy0-ap0 wasn't started
+```
+
+实测去掉 `country` 后，同一份配置直接 `UNINITIALIZED->ENABLED` + `AP-ENABLED`。
+**所以 country 在这块板上有害无益**（既没生效，又引入 1 秒竞态）。
+
+顺带：`country_ie` 和 `doth` 必须**一起关**。只关 `country_ie` 会得到
+
+```
+hostapd: Cannot enable IEEE 802.11h without IEEE 802.11d enabled
+hostapd: 1 errors found in configuration file '<inline>'
+```
+
+因为 `hostapd.sh:158 set_default country_ie 1`、`:160 set_default doth 1`，
+而 `:174 [ "$hwmode" = "a" -a "$doth" -gt 0 ] && append base_cfg "ieee80211h=1"`。
+
+#### 根因 B：`find_reusable_wdev()` 把正在跑的 AP 当成"空闲件"改名顶掉
+
+去掉 country 后 AP 能 `AP-ENABLED` 了，但**几秒后仍然消失**。dmesg 给出铁证：
+
+```
+[21.349] aicwf_sdio mmc2:390b:1 phy0-ap0: left allmulticast mode
+[21.377] br-lan: port 2(phy0-ap0) entered blocking state
+[21.377] br-lan: port 2(phy0-ap0) entered disabled state
+[22.105] aicwf_sdio mmc2:390b:1 phy0-sta0: renamed from phy0-ap0 (while UP)   ← 就是这句
+[23.662] rwnx_send_sm_connect_req drv_vif_index:0 connect to zzz_5G(6) channel:5180
+```
+
+**STA 接口是把 AP 接口改名来的**，不是新建的。源头在 `/usr/share/hostap/common.uc`：
+
+```js
+function find_reusable_wdev(phyidx)
+{
+	if (!__phy_is_fullmac(phyidx)) return null;        // ← 只对 fullmac 驱动生效
+	let data = nl80211.request(NL80211_CMD_GET_INTERFACE, NLM_F_DUMP, {wiphy: phyidx});
+	for (let res in data)
+		if (trim(readfile(`/sys/class/net/${res.ifname}/operstate`)) == "down")
+			return res.ifname;                           // ← 返回第一个 operstate=down 的
+	return null;
+}
+```
+
+`wdev_create()` 拿到它之后走改名复用分支：
+
+```js
+let reuse_ifname = find_reusable_wdev(phyidx);
+if (reuse_ifname &&
+    (reuse_ifname == name ||
+     rtnl.request(rtnl.const.RTM_SETLINK, 0, { dev: reuse_ifname, ifname: name }) != false)) {
+	... NL80211_CMD_SET_INTERFACE ...     // 改名复用
+} else {
+	... NL80211_CMD_NEW_INTERFACE ...     // 正常新建
+}
+```
+
+**`operstate == "down"` 被当成"接口空闲"的判据，而这个判据是错的**：刚启用的 AP 在
+网桥端口 settling 期间（上面 `entered blocking/disabled state` 那两行）operstate 恰好
+读作 `down`，管理状态却是 UP —— 内核那句 `(while UP)` 就是矛盾的直接证据。
+AIC8800 是 **fullmac**，所以会走进这个分支；softmac 驱动（ath9k/mt76 等）走不到，
+这就是为什么这个坑看起来"只有这块板有"。
+
+修法（`patches/70-wdev-reusable-wdev-fix.sh`）：**已是网桥端口的接口必定在用，跳过它**
+（`/sys/class/net/<if>/brport` 只在该接口是网桥端口时存在）。这是对上游判据的最小收紧，
+不改变它对真正空闲接口（上次配置残留、未入桥、operstate=down）的复用语义。
+
+> 没有选择"直接禁用整个复用分支"：AIC8800 实测支持 AP+STA 并发
+> （`valid interface combinations: #{managed} <= 1, #{AP} <= 1, total <= 4`，
+> 且在 sta0 已关联时手工 `iw phy phy0 interface add testap0 type __ap` 成功），
+> 但禁用复用会改变模式切换时的行为，影响面更大。最小修法优先。
+
+#### 排查过程中两个被证伪的假设（记下来省事）
+
+| 假设 | 怎么证伪的 |
+|---|---|
+| "netifd 的 `Preparing interface` 把 AP 的 netdev 删了重建" | 读 `/usr/share/ucode/wifi/iface.uc:263` 的 `prepare()`：它**只算 MAC 地址 + 打一行日志**，完全不碰 netdev |
+| "AP 和 STA 抢同一个 MAC（基础 MAC）导致冲突" | 给两个 iface 显式设 `option macaddr` 后重启，**故障照旧**，而且 sta0 拿到的是我给 AP 设的那个 MAC → 说明 MAC 不是自变量，是"接口被改名"的结果而非原因 |
+
+另外注意：`wifi down; wifi up` **不能**修复（复现同样的失败），只有"禁用该 iface 再启用"
+可以 —— 因为后者只重建一个接口，此时另一个已 UP、不会被判为空闲件。
+
+#### 验证
+
+打上两处修复后**连续两次冷启动**：
+
+```
+iw dev   → phy0-ap0  94:ba:06:49:ae:26  ssid ImmortalWrt  type AP       ch36/80MHz
+           phy0-sta0 92:ba:06:49:ae:26  ssid zzz_5G       type managed  ch36/80MHz
+br-lan   → eth0 + phy0-ap0
+dmesg    → "renamed from" 0 次
+logread  → "Failed to set beacon" 0 次；AP-ENABLED 1 次
+ubus     → up:true / pending:false / retry_setup_failed:false
+```
+
 ## 5. 最终配置（extlinux.conf）
 
 ```
