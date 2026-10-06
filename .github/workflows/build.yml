@@ -2,7 +2,10 @@ name: Build A5E OpenWrt Image
 
 # 触发：
 #   - 手动 dispatch：可选填 deb_tag / deb_flavor / kernel_tag
-#   - push 到 main 且改了构建相关文件
+#   - push 到**任意分支**且改了构建相关文件（feature 分支也能自动构建验证）
+# ⚠ 但 **release 只在 main 发**：本仓的 release 就是给用户烧的成品镜像，
+#   分支构建若也发 release，会被当成正式版消费（同 kernel 仓下游取“最新一条
+#   非 draft release”那类问题）。分支只出 artifact。
 # 流程：15 下 Debian 资产 → 20 tar 提取 u-boot/initrd → 25 拉 kernel-actions 内核
 #       → 30 下 ImmortalWrt rootfs → 40 拼装 rootfs.tar → 50 guestfish 打包 img
 # 打包(50)用 **nix 的 libguestfs-with-appliance**（自带 fixed appliance 内核，不碰宿主
@@ -25,7 +28,7 @@ on:
         required: false
         default: 'latest'
   push:
-    branches: [main]
+    branches: ['**']          # 任意分支都触发；release 另受 main 限制（见 release job 的 if）
     paths:
       - 'scripts/**'
       - 'custom/**'
@@ -171,7 +174,9 @@ jobs:
   # （tag = rel-<UTC 日期时分秒>-r<run号>，唯一不覆盖、不依赖 v* tag 触发）
   release:
     needs: build
-    if: needs.build.result == 'success'
+    # 只有 main 发 release：分支构建（含 feature 分支上的 workflow_dispatch）只留 artifact，
+    # 避开了“测试分支的镜像被当成正式版烧到板子上”。
+    if: needs.build.result == 'success' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
