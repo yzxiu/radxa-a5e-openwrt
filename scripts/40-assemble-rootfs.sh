@@ -188,7 +188,7 @@ echo "   ✓ /sbin/wifi + /usr/sbin/iw + mac80211.sh 就位"
 
 log "④ 应用整文件定制 custom/rootfs/*（overlay 覆盖）"
 cp -a "$CUSTOM/." "$ROOTFS_DIR/" 2>/dev/null || true
-# cp -a 会把 overlay 源目录的**宋主属主**一并带进镜像（git checkout 在 CI 里属
+# cp -a 会把 overlay 源目录的**宿主属主**一并带进镜像（git checkout 在 CI 里属
 # runner uid，实测板上 /etc/config/wireless 变成了 1000:1000）。这些都是我们自己的
 # 配置/脚本，应当 root:root。只改 overlay 确实提供的那些文件（-h 不跟随符号链），
 # 不去 chown -R 整个 rootfs ——那会把 OpenWrt 里故意的服务用户属主一并抹平。

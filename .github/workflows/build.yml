@@ -66,7 +66,7 @@ jobs:
           # 40 步要 chroot 进 aarch64 rootfs 跑 apk（wifi-scripts/iw 的 post-install
           # 必须在目标环境里执行），靠 qemu-user + binfmt_misc 做用户态模拟。
           # 这里故意不做「检查 /proc/sys/fs/binfmt_misc/qemu-aarch64 是否存在」：
-          # binfmt_misc 是宋主全局机制，该文件看不到不等于跑不了（实测过这个假
+          # binfmt_misc 是宿主全局机制，该文件看不到不等于跑不了（实测过这个假
           # 阴性）。真正的功能检查放在 40 步 chroot 之前（跑 /bin/uname -m）。
 
       - name: setup nix (提供 libguestfs-with-appliance)
@@ -93,7 +93,7 @@ jobs:
       - name: 25 fetch kernel-actions custom kernel (vmlinuz + modules + dtb)
         env:
           KERNEL_ACTIONS_TAG: ${{ inputs.kernel_tag || 'latest' }}
-          # 必须传：匠名 GitHub API 限额 60 次/小时/**IP**，而托管 runner 共享 Azure
+          # 必须传：匿名 GitHub API 限额 60 次/小时/**IP**，而托管 runner 共享 Azure
           # 出口 IP，别人把额度用光你就 403（run #19 实测）。带 token 后是
           # 5000 次/小时/token，且读公共仓的 release 用本仓 token 就够。
           GITHUB_TOKEN: ${{ github.token }}
