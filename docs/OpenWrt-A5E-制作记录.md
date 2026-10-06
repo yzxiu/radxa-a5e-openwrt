@@ -374,6 +374,197 @@ debugfs -R "stat /usr/lib/linux-image-$KVER/allwinner/sun55i-a527-cubie-a5e.dtb"
 
 ---
 
+### 坡 10：内核里 WiFi 驱动 builtin 了，wlan 却还是不在（三层静默失败）
+
+kernel 仓把 AIC8800 驱动整体 builtin 后（`vendor/aic8800`，异步线程等真 rootfs
+再初始化），板上依然 `ls /sys/class/ieee80211/` 为空。查下来是**三层各自静默失败**，
+每一层都不报错，叠加起来就是“什么都没有”：
+
+| 层 | 缺什么 | 为何不报错 |
+|---|---|---|
+| 固件 | `/lib/firmware/aic8800_fw/SDIO/aic8800D80/`（15 个文件） | 驱动用 **`filp_open` 直读**（不是 `request_firmware`），路径写死在 `CONFIG_AIC_FW_PATH`。内核里的异步初始化线程就是靶轮询这个目录判断“真 rootfs 挂好了”，目录不存在 → **它就一直等，一条日志都不打** |
+| 用户态包 | `wifi-scripts`（提供 `/sbin/wifi` + netifd 的 `mac80211.sh`）、`iw` | ImmortalWrt 25.12 把这些从 base-files 拆出去了，armsr 通用 rootfs 里没有 → `wifi config`/`wifi up` 全是 `not found`，netifd 根本没有无线 handler |
+| wpad 降权 | `/etc/capabilities/wpad.json` | procd 按它把 wpad 降到 `network` 用户 + 受限 capability 集，hostapd 在非 root 下**注册不上 ubus 对象** → `ubus wait_for hostapd` 永久挂住，AP 起了也用不了 |
+| wpad 变体 | 基础 rootfs 预装 `wpad-mesh-mbedtls`（**minimal**，没编 802.11ac/ax） | 想开 5G 时 hostapd 对 `ieee80211ac`/`vht_capab`/`ieee80211ax`/`he_oper_chwidth` 全报 `unknown configuration item` → `add_iface failed`；而 **ubus 仍报 `up:true`**，只有 `iw dev` 里 `phy0-ap0` **没有 channel 行**才看得出根本没在发 |
+
+
+#### 更正：这颗芯片是**双频**的，不是 2.4G 单频
+
+早期误判 AIC8800D80 是"2.4G 单频"，于是把配置锁成 `2g/6/HT20`，还反过来把
+`wifi config` 探测出的 `5g/36/HE80` 当成"猜错了"。板上 `iw phy phy0 info` 实测：
+
+- **Band 1(2.4G) + Band 2(5G) 都有**，5G 覆盖信道 **36–165**（每个 20 dBm）
+- HE PHY Capabilities 含 80MHz，`HE Iftypes: managed, AP`
+- VHT 最高 **390 Mbps** = 2 流 × 195 → **2×2**
+- 但只暴露 **1 个 phy** → 单射频，**2.4G 与 5G 不能同时开**，只能二选一
+
+所以 `wifi config` 当初探测成 `5g/36/HE80` **是对的**；hostapd 起不来的真正原因是
+上表最后一行——**wpad 是 minimal 变体**。换成 full 版 `wpad-mbedtls` 后 `5g/36/HE80`
+直接 AP-ENABLED。冷启动实测：`iw dev` → `channel 36 (5180 MHz), width: 80 MHz,
+center1: 5210 MHz`；hostapd 配置里 `hw_mode=a`、`ieee80211ac=1`、`ieee80211ax=1`、
+`he_oper_chwidth=1`、`he_oper_centr_freq_seg0_idx=42`；配置错误 0 条；`phy0-ap0`
+已桥进 br-lan；`ubus` 报 `up:true / pending:false / retry_setup_failed:false`。
+信道 36 是**非 DFS** 信道（52–144 要 60s CAC 雷达检测），所以默认就用它。
+
+⚠ 换 wpad 有两个坑，都在板上踩过：
+1. apk 不允许两个 provide `hostapd`/`wpa-supplicant` 的包共存，也**不会自动替换**：
+   直接 `apk add wpad-mbedtls` 会报 `ERROR: unable to select packages:` + conflicts
+   分析、**退出码 2**、什么都不装（板上实测）→ 必须先 `apk del wpad-mesh-mbedtls`。
+   （更正：早先这里写成"退出码不报错、静默什么都不做"，是我当时用 `| grep | tail -8`
+   观测的——退出码被管道末端吃掉、`ERROR:` 首行被 tail 截掉，属测量错误。）
+2. 换包不会重启已在跑的 hostapd（`wifi down/up` 也不重启守护进程，netifd 是通过
+   ubus `hostapd.add_iface` 去找**老进程**），实测老进程的 `/proc/<pid>/exe` 显示
+   `/usr/sbin/wpad (deleted)` → 必须 `/etc/init.d/wpad restart` 才生效。
+   构建期装包不受影响（那时还没进程）。
+
+**固化位置**：固件 `20-extract-kernel.sh` 提取 + `40-assemble` ②c 落盘；包 `40` ③b
+（chroot+apk，qemu-user 跑 aarch64，因为 `wifi-scripts`/`iw` 的 post-install 脚本
+必须在目标环境里执行）；wpad 降权 `patches/60-wpad-no-drop-privilege.sh`；wpad 换 full 版 `40` ③b
+（先 `apk del` 再 `apk add`，装完查包 DB 确认）；配置
+`custom/rootfs/etc/config/wireless`（默认 5g/36/HE80）。CI 里加了 12 条断言卡住这些（缺任一项就红），
+因为这类失败的共同特征就是**不报错**。
+
+**顺带查清但不修的两件事**：
+
+- **不装 `wireless-regdb`**：驱动 `rwnx_mod_params.c` 里 `COMMON_PARAM(custregd, true, true)`
+  默认为真（上游 `MODULE_PARM_DESC` 写的 "Default: 0" 是过时的），phy0 会设
+  `REGULATORY_WIPHY_SELF_MANAGED` 用驱动自带 regdomain，cfg80211 的 `regulatory.db`
+  对它不起作用；且本内核 `CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y`，而 OpenWrt 的
+  `wireless-regdb` 只给 `regulatory.db`、不给 `.p7s`（上游 tarball 才成对，且与
+  OpenWrt 重建过的 db 字节不一致，不能混用）→ 装了照样被拒。
+- **`libcrc32c: exports duplicate symbol crc32c`**：initramfs 是从 RadxaOS 按原始
+  config 打的包，里面还带着 `libcrc32c.ko.xz`；而内核因为 `NF_TABLES=y`
+  `select LIBCRC32C` 已把 crc32c 编进 vmlinux → 加载即撞车。initrd 里 117 个模块
+  **只有这 1 个**冲突，且挂 root 所需的 `MMC_BLOCK`/`EXT4_FS`/`JBD2` 全已 builtin，
+  那 46MB 未压缩 cpio 每次开机白解包。属可选优化（精简 initrd），非阻塞。
+
+### 坑 11：AP + STA 同开时，重启后 AP 会消失（要在 LuCI 上禁用再启用才好）
+
+**现象**：`/etc/config/wireless` 里同时配 AP（`default_radio0`，桥进 br-lan）和 STA
+（`wifinet1`，连上级路由）时，冷启动后：
+
+```
+iw dev              → 只有 phy0-sta0，没有 phy0-ap0
+brctl show br-lan   → 只有 eth0
+logread             → hostapd: Failed to set beacon parameters   每 6 秒一次，无限刷
+ubus ... wireless   → "up": true, "retry_setup_failed": false    ← 又是假象
+```
+
+在 LuCI 上把 AP 禁用再启用，两个就都正常了。**单开 AP 不受影响**，所以这个问题
+只有在 AP+STA 同开时才暴露。
+
+查下来是**两个独立的根因**，必须都修：
+
+#### 根因 A：`option country` 让 hostapd 卡在 `COUNTRY_UPDATE` 超时
+
+驱动 `rwnx_mod_params.c` 里 `COMMON_PARAM(custregd, true, true)` 默认为真，phy0 被打上
+`REGULATORY_WIPHY_SELF_MANAGED`：
+
+```
+$ iw reg get
+phy#0 (self-managed)
+country 00: DFS-UNSET          ← 设了 country 'CN' 也不会变成 CN
+```
+
+而 hostapd 只要看到 `country_code=`，就会进 `COUNTRY_UPDATE` 等内核的 REG_CHANGE 事件；
+self-managed 的 phy 不给它期待的那个事件 → **等 1 秒超时**：
+
+```
+hostapd: phy0-ap0: interface state UNINITIALIZED->COUNTRY_UPDATE
+hostapd: phy0-ap0: AP-DISABLED                       ← 恰好 1 秒后
+hostapd: hostapd_free_hapd_data: Interface phy0-ap0 wasn't started
+```
+
+实测去掉 `country` 后，同一份配置直接 `UNINITIALIZED->ENABLED` + `AP-ENABLED`。
+**所以 country 在这块板上有害无益**（既没生效，又引入 1 秒竞态）。
+
+顺带：`country_ie` 和 `doth` 必须**一起关**。只关 `country_ie` 会得到
+
+```
+hostapd: Cannot enable IEEE 802.11h without IEEE 802.11d enabled
+hostapd: 1 errors found in configuration file '<inline>'
+```
+
+因为 `hostapd.sh:158 set_default country_ie 1`、`:160 set_default doth 1`，
+而 `:174 [ "$hwmode" = "a" -a "$doth" -gt 0 ] && append base_cfg "ieee80211h=1"`。
+
+#### 根因 B：`find_reusable_wdev()` 把正在跑的 AP 当成"空闲件"改名顶掉
+
+去掉 country 后 AP 能 `AP-ENABLED` 了，但**几秒后仍然消失**。dmesg 给出铁证：
+
+```
+[21.349] aicwf_sdio mmc2:390b:1 phy0-ap0: left allmulticast mode
+[21.377] br-lan: port 2(phy0-ap0) entered blocking state
+[21.377] br-lan: port 2(phy0-ap0) entered disabled state
+[22.105] aicwf_sdio mmc2:390b:1 phy0-sta0: renamed from phy0-ap0 (while UP)   ← 就是这句
+[23.662] rwnx_send_sm_connect_req drv_vif_index:0 connect to zzz_5G(6) channel:5180
+```
+
+**STA 接口是把 AP 接口改名来的**，不是新建的。源头在 `/usr/share/hostap/common.uc`：
+
+```js
+function find_reusable_wdev(phyidx)
+{
+	if (!__phy_is_fullmac(phyidx)) return null;        // ← 只对 fullmac 驱动生效
+	let data = nl80211.request(NL80211_CMD_GET_INTERFACE, NLM_F_DUMP, {wiphy: phyidx});
+	for (let res in data)
+		if (trim(readfile(`/sys/class/net/${res.ifname}/operstate`)) == "down")
+			return res.ifname;                           // ← 返回第一个 operstate=down 的
+	return null;
+}
+```
+
+`wdev_create()` 拿到它之后走改名复用分支：
+
+```js
+let reuse_ifname = find_reusable_wdev(phyidx);
+if (reuse_ifname &&
+    (reuse_ifname == name ||
+     rtnl.request(rtnl.const.RTM_SETLINK, 0, { dev: reuse_ifname, ifname: name }) != false)) {
+	... NL80211_CMD_SET_INTERFACE ...     // 改名复用
+} else {
+	... NL80211_CMD_NEW_INTERFACE ...     // 正常新建
+}
+```
+
+**`operstate == "down"` 被当成"接口空闲"的判据，而这个判据是错的**：刚启用的 AP 在
+网桥端口 settling 期间（上面 `entered blocking/disabled state` 那两行）operstate 恰好
+读作 `down`，管理状态却是 UP —— 内核那句 `(while UP)` 就是矛盾的直接证据。
+AIC8800 是 **fullmac**，所以会走进这个分支；softmac 驱动（ath9k/mt76 等）走不到，
+这就是为什么这个坑看起来"只有这块板有"。
+
+修法（`patches/70-wdev-reusable-wdev-fix.sh`）：**已是网桥端口的接口必定在用，跳过它**
+（`/sys/class/net/<if>/brport` 只在该接口是网桥端口时存在）。这是对上游判据的最小收紧，
+不改变它对真正空闲接口（上次配置残留、未入桥、operstate=down）的复用语义。
+
+> 没有选择"直接禁用整个复用分支"：AIC8800 实测支持 AP+STA 并发
+> （`valid interface combinations: #{managed} <= 1, #{AP} <= 1, total <= 4`，
+> 且在 sta0 已关联时手工 `iw phy phy0 interface add testap0 type __ap` 成功），
+> 但禁用复用会改变模式切换时的行为，影响面更大。最小修法优先。
+
+#### 排查过程中两个被证伪的假设（记下来省事）
+
+| 假设 | 怎么证伪的 |
+|---|---|
+| "netifd 的 `Preparing interface` 把 AP 的 netdev 删了重建" | 读 `/usr/share/ucode/wifi/iface.uc:263` 的 `prepare()`：它**只算 MAC 地址 + 打一行日志**，完全不碰 netdev |
+| "AP 和 STA 抢同一个 MAC（基础 MAC）导致冲突" | 给两个 iface 显式设 `option macaddr` 后重启，**故障照旧**，而且 sta0 拿到的是我给 AP 设的那个 MAC → 说明 MAC 不是自变量，是"接口被改名"的结果而非原因 |
+
+另外注意：`wifi down; wifi up` **不能**修复（复现同样的失败），只有"禁用该 iface 再启用"
+可以 —— 因为后者只重建一个接口，此时另一个已 UP、不会被判为空闲件。
+
+#### 验证
+
+打上两处修复后**连续两次冷启动**：
+
+```
+iw dev   → phy0-ap0  94:ba:06:49:ae:26  ssid ImmortalWrt  type AP       ch36/80MHz
+           phy0-sta0 92:ba:06:49:ae:26  ssid zzz_5G       type managed  ch36/80MHz
+br-lan   → eth0 + phy0-ap0
+dmesg    → "renamed from" 0 次
+logread  → "Failed to set beacon" 0 次；AP-ENABLED 1 次
+ubus     → up:true / pending:false / retry_setup_failed:false
+```
+
 ## 5. 最终配置（extlinux.conf）
 
 ```
@@ -404,6 +595,8 @@ label l0
 - ✅ SSH 可登录（root，默认无密码）
 - ✅ 双千兆网口内核识别（eth0/eth1 都 link up）
 - ✅ bridge 模块加载（修复后），br-lan 可建，LAN 可用
+- ✅ WiFi（AIC8800D80）：冷启动零干预自动起 AP、桥进 br-lan（驱动 builtin +
+  坡 10 那四件用户态资产；板上实测 ~8s 到 AP-ENABLED，`lsmod | grep -c aic` = 0）
 
 ### 6.2 已知问题 / 待办
 
@@ -411,7 +604,7 @@ label l0
 |---|---|---|
 | 串口 shell 不响应 | ✅ 已定位，部分修复 | 双层根因：inittab 缺 `ttyAS0`（Allwinner BSP 命名）+ plymouthd 开机占用 console（详见坑 8）。已在镜像 inittab 加 `ttyAS0` 行（sha 7d7a34a5）；**plymouth 禁用未做**（每次开机需手动补 login），Ctrl+C 信号待查。不影响 SSH/LuCI 管理 |
 | LAN/br-lan 建不起来 | ✅ 已修复待烧录验证 | 根因是 .ko.xz 模块 + modprobe 依赖解析失灵（详见坑 7）。已固化：.ko 转换 + `init.d/bridge-modules` 启动预加载（START=15），**需重新烧录**验证 br-lan 自动建 |
-| WiFi（AIC8800） | 未验证 | 模块已转 .ko 可加载，但固件/配置未测 |
+| WiFi（AIC8800） | ✅ 已修复 | 驱动 builtin（kernel 仓）+ 固件/用户态包/wpad 降权/预置配置四件套（本仓，详见坡 10）。**默认是开放 AP**（SSID=ImmortalWrt，encryption=none），上线请立即改加密 |
 | rootfs 首次启动扩容 | 部分 | GROWROOT 扩分区成功，但 OpenWrt 无 cloud-initramfs-growroot 的 resize 后续，首次需完整跑完 |
 | MAC 地址随机 | 已知 | eth0 用随机 MAC（`Use random mac address`），每次启动可能变 |
 | root 无密码 | 安全风险 | 默认 root 空密码，需 `passwd` 设置 |

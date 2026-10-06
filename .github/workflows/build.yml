@@ -2,7 +2,10 @@ name: Build A5E OpenWrt Image
 
 # 触发：
 #   - 手动 dispatch：可选填 deb_tag / deb_flavor / kernel_tag
-#   - push 到 main 且改了构建相关文件
+#   - push 到**任意分支**且改了构建相关文件（feature 分支也能自动构建验证）
+# ⚠ 但 **release 只在 main 发**：本仓的 release 就是给用户烧的成品镜像，
+#   分支构建若也发 release，会被当成正式版消费（同 kernel 仓下游取“最新一条
+#   非 draft release”那类问题）。分支只出 artifact。
 # 流程：15 下 Debian 资产 → 20 tar 提取 u-boot/initrd → 25 拉 kernel-actions 内核
 #       → 30 下 ImmortalWrt rootfs → 40 拼装 rootfs.tar → 50 guestfish 打包 img
 # 打包(50)用 **nix 的 libguestfs-with-appliance**（自带 fixed appliance 内核，不碰宿主
@@ -25,7 +28,7 @@ on:
         required: false
         default: 'latest'
   push:
-    branches: [main]
+    branches: ['**']          # 任意分支都触发；release 另受 main 限制（见 release job 的 if）
     paths:
       - 'scripts/**'
       - 'custom/**'
@@ -35,6 +38,12 @@ on:
 
 permissions:
   contents: write
+
+# 同一分支连续推送时，取消还在跑的旧构建（现在所有分支都触发，
+# 不然改一行就堆一个 45 分钟的 run）。main 上也适用：新 push 本就超越旧的。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   DEBIAN_FRONTEND: noninteractive
@@ -52,7 +61,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             curl ca-certificates xz-utils cpio rsync python3 tar coreutils \
-            e2fsprogs util-linux parted
+            e2fsprogs util-linux parted \
+            qemu-user-static binfmt-support
+          # 40 步要 chroot 进 aarch64 rootfs 跑 apk（wifi-scripts/iw 的 post-install
+          # 必须在目标环境里执行），靠 qemu-user + binfmt_misc 做用户态模拟。
+          # 这里故意不做「检查 /proc/sys/fs/binfmt_misc/qemu-aarch64 是否存在」：
+          # binfmt_misc 是宿主全局机制，该文件看不到不等于跑不了（实测过这个假
+          # 阴性）。真正的功能检查放在 40 步 chroot 之前（跑 /bin/uname -m）。
 
       - name: setup nix (提供 libguestfs-with-appliance)
         uses: DeterminateSystems/nix-installer-action@main
@@ -78,6 +93,10 @@ jobs:
       - name: 25 fetch kernel-actions custom kernel (vmlinuz + modules + dtb)
         env:
           KERNEL_ACTIONS_TAG: ${{ inputs.kernel_tag || 'latest' }}
+          # 必须传：匿名 GitHub API 限额 60 次/小时/**IP**，而托管 runner 共享 Azure
+          # 出口 IP，别人把额度用光你就 403（run #19 实测）。带 token 后是
+          # 5000 次/小时/token，且读公共仓的 release 用本仓 token 就够。
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/25-fetch-kernel.sh
 
       - name: 30 fetch ImmortalWrt armsr rootfs
@@ -86,14 +105,47 @@ jobs:
       - name: 40 assemble OpenWrt rootfs.tar
         run: bash scripts/40-assemble-rootfs.sh
 
-      - name: 校验拼装产物（dtb 落点 / bridge 无 workaround）
+      - name: 校验拼装产物（dtb / bridge / WiFi 六件套）
+        # 断言必须独立于脚本内的 die：这类失败的共同特征是"不报错"，
+        # 历史上已经出过一个 CI 全绿、板上 wlan 静默不在的 release（r14）。
         run: |
           set -euo pipefail
           T="../owrt/openwrt-a5e-rootfs.tar"
           [ -f "$T" ] || { echo "缺 rootfs.tar"; exit 1; }
-          tar -tf "$T" | grep -E "usr/lib/linux-image-[^/]+/allwinner/sun55i-a527-cubie-a5e\.dtb" \
-            && echo "✓ a5e dtb 在 usr/lib/linux-image/allwinner/" || { echo "✗ dtb 缺"; exit 1; }
-          if tar -tf "$T" | grep -q "etc/init.d/bridge-modules"; then echo "✗ 不该有 bridge workaround"; exit 1; else echo "✓ 无 bridge workaround（kernel-actions 已 builtin）"; fi
+          L=$(mktemp); tar -tf "$T" > "$L"
+          chk()  { grep -qE "$1" "$L" && echo "✓ $2" || { echo "✗ 缺：$2"; exit 1; }; }
+          nchk() { if grep -qE "$1" "$L"; then echo "✗ 不该有：$2"; exit 1; else echo "✓ $2"; fi; }
+          chk  "usr/lib/linux-image-[^/]+/allwinner/sun55i-a527-cubie-a5e\.dtb" "a5e dtb 在 usr/lib/linux-image/allwinner/"
+          nchk "etc/init\.d/bridge-modules" "无 bridge workaround（kernel-actions 已 builtin）"
+          # ---- WiFi：缺任一项都是「镜像能启动但 wlan 静默不在」，必须在这里卡住 ----
+          chk  "lib/firmware/aic8800_fw/SDIO/aic8800D80/fmacfw_8800d80_u02\.bin" "AIC8800D80 固件在位（驱动 filp_open 直读）"
+          chk  "(^|/)sbin/wifi$"                          "/sbin/wifi（wifi-scripts）"
+          chk  "(^|/)usr/sbin/iw$"                        "/usr/sbin/iw"
+          chk  "lib/netifd/wireless/mac80211\.sh"         "netifd mac80211 handler"
+          chk  "etc/capabilities/wpad\.json\.disabled"    "wpad 降权已禁用"
+          nchk "etc/capabilities/wpad\.json$"             "wpad.json 未残留（否则 hostapd 注册不上 ubus）"
+          chk  "etc/config/wireless$"                     "/etc/config/wireless 已预置"
+          chk  "lib/apk/packages/wpad-mbedtls\.list"       "wpad 是 full 版（含 802.11ac/ax）"
+          nchk "lib/apk/packages/wpad-mesh-"               "无 minimal 版 wpad 残留（那个没 ac/ax，5G 起不来）"
+          # 频段要从 tar 里把文件抽出来看（tar -tf 只有文件名）—— 默认必预置 5G
+          BAND=$(tar -xOf "$T" ./etc/config/wireless 2>/dev/null | grep -oE "option band '[0-9]g'" | head -1)
+          [ "$BAND" = "option band '5g'" ] && echo "✓ 默认频段 5g" || { echo "✗ 默认频段不是 5g（得到：${BAND:-空}）"; exit 1; }
+          # common.uc 的 find_reusable_wdev 补丁必须在：缺了它，AP+STA 同开时
+          # 刚启用的 AP 会被当成"空闲件"改名成 sta0（dmesg: renamed from phy0-ap0）
+          if tar -xOf "$T" ./usr/share/hostap/common.uc 2>/dev/null | grep -q "A5E-FIX-FIND-REUSABLE-WDEV"; then
+            echo "✓ common.uc 已打 find_reusable_wdev 补丁"
+          else
+            echo "✗ common.uc 补丁缺失（AP+STA 同开时 AP 会被改名顶掉）"; exit 1
+          fi
+          # 不得设 option country：phy0 是 self-managed（custregd=true），country 不会生效，
+          # 却会让 hostapd 进 COUNTRY_UPDATE 等 REG_CHANGE、1 秒超时后 AP-DISABLED。
+          # 注意正则末尾的空格：要能区分 `option country 'CN'` 与 `option country_ie '0'`。
+          if tar -xOf "$T" ./etc/config/wireless 2>/dev/null | grep -qE "^[[:space:]]*option country "; then
+            echo "✗ wireless 里有 option country（self-managed phy 上会让 hostapd 卡 COUNTRY_UPDATE）"; exit 1
+          else
+            echo "✓ wireless 未设 option country"
+          fi
+          rm -f "$L"
 
       - name: stage rootfs.tar into workspace
         run: mkdir -p dist && cp ../owrt/openwrt-a5e-rootfs.tar dist/
@@ -154,7 +206,9 @@ jobs:
   # （tag = rel-<UTC 日期时分秒>-r<run号>，唯一不覆盖、不依赖 v* tag 触发）
   release:
     needs: build
-    if: needs.build.result == 'success'
+    # 只有 main 发 release：分支构建（含 feature 分支上的 workflow_dispatch）只留 artifact，
+    # 避开了“测试分支的镜像被当成正式版烧到板子上”。
+    if: needs.build.result == 'success' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: write

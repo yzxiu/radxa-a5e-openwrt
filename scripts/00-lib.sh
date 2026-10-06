@@ -70,6 +70,39 @@ KA_DIR="$OWRT/a5e-kernel-actions"                      # 下载/解压目录
 UBOOT_SRC="$KERNEL_DIR/$UBOOT_DIR"
 INITRD_SRC="$KERNEL_DIR/initrd.img-$KVER"
 
+# ---- 板载 WiFi（AIC8800D80 / SDIO；驱动已 builtin 进内核，见 kernel 仓 vendor/aic8800）----
+# 固件必须随镜像分发：驱动用 filp_open 直读 CONFIG_AIC_FW_PATH（**不走** request_firmware），
+# 路径错了就是静默失败——内核里的异步初始化线程会一直轮询该目录、永远等不到，
+# 表现为「没有 phy0、wlan 起不来、且 dmesg 里一条错误都没有」。来源：Radxa Debian
+# rootfs 的 usr/lib/firmware/（20 步顺带提取，与 u-boot/initrd 同一个 tar）。
+AIC_FW_SUB="aic8800_fw/SDIO/aic8800D80"          # 板上 dmesg 实测的芯片型号子目录
+AIC_FW_DIR="$OWRT/aic-firmware/$AIC_FW_SUB"      # 20 步提取后的落点
+
+# 用户态必装包（40 步 chroot+apk 装进 rootfs）：
+#   wifi-scripts → /sbin/wifi + /lib/netifd/wireless/mac80211.sh（netifd 的无线 handler，
+#                  25.12 从 base-files 新拆出来的包；缺了它 uci 无线流程全部 not found）
+#   iw           → mac80211.sh 的 setup_phy 硬依赖（set antenna/distance/txpower）
+# 注：**不装 wireless-regdb**。两个原因：① 驱动 rwnx_mod_params.c 里
+# COMMON_PARAM(custregd, true, true) 默认为真 → phy0 走 REGULATORY_WIPHY_SELF_MANAGED、
+# 用驱动自带 regdomain，cfg80211 的 regulatory.db 对它不起作用（上游 MODULE_PARM_DESC
+# 写的 "Default: 0" 是过时的）；② 本内核 CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y，而
+# OpenWrt 的 wireless-regdb 只给 regulatory.db、不给 regulatory.db.p7s，装了照样被拒。
+WIFI_PKGS=${WIFI_PKGS:-iw wifi-scripts}
+
+# ⚠ 必须把基础 rootfs 预装的 wpad 换成 full 版，否则 5G 起不来。
+# 预装的是 wpad-mesh-mbedtls，它自己的描述就是 "minimal ... (with 802.11s mesh and SAE)"，
+# 编译时**没开 CONFIG_IEEE80211AC / CONFIG_IEEE80211AX** —— 板上实测 hostapd 对
+# `ieee80211ac` / `vht_capab` / `vht_oper_chwidth` / `ieee80211ax` / `he_oper_chwidth`
+# 全部报 "unknown configuration item"（HE80 时 40+ 条、VHT80 时 4 条）→
+# `hostapd.add_iface failed` → iw dev 里 phy0-ap0 **没有 channel 行**（根本没在发），
+# 而 ubus 却报 up:true —— 典型假象，必须用 iw dev 才算数。
+# wpad-mbedtls 描述是 "full featured"，实测 ac+ax 都在，HE80/ch36 能 AP-ENABLED。
+# 注意：apk 不允许两个 provide hostapd/wpa-supplicant 的包共存，也**不会自动替换**——
+# 直接 `apk add wpad-mbedtls` 会报 `ERROR: unable to select packages:` + conflicts 分析、
+# **退出码 2**、什么都不装（板上实测）。所以必须先 `apk del` 旧变体再 add。
+# 另：换了 wpad 后 apk 会重新落地 /etc/capabilities/wpad.json，patches/60 会再改名。
+WIFI_WPAD_PKG=${WIFI_WPAD_PKG:-wpad-mbedtls}
+
 # ---- 引导参数（extlinux append；root=UUID 由 build-image 用 blkid 注入，勿硬编码）----
 APPEND_PARAMS="console=ttyAS0,115200n8 earlyprintk=sunxi-uart,0x2500000 rootwait clk_ignore_unused mac_addr=\${mac} mac1_addr=\${mac1} loglevel=4 rw earlycon consoleblank=0 console=tty1 coherent_pool=2M irqchip.gicv3_pseudo_nmi=0"
 

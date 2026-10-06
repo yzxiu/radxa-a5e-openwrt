@@ -10,6 +10,8 @@
 # 需要的资产（后续拼进 OpenWrt rootfs）：
 #   vmlinuz-<KVER> / initrd.img-<KVER> / <DTB> / lib/modules/<KVER>（含 .ko.xz）
 #   u-boot: setup.sh + u-boot-sunxi-with-spl.bin（SPL 写到 LBA 256，非传统 LBA0/8）
+#   WiFi 固件: usr/lib/firmware/aic8800_fw/SDIO/aic8800D80/（驱动 filp_open 直读，
+#             缺了 wlan 静默起不来；见 00-lib.sh 的 AIC_FW_*）
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.." && source scripts/00-lib.sh
@@ -24,6 +26,7 @@ tar -xf "$ROOTFS_TGZ" -C "$TMP" --wildcards \
   "./boot/vmlinuz-$KVER" "./boot/initrd.img-$KVER" \
   "./usr/lib/modules/$KVER*" "./lib/modules/$KVER*" \
   "./usr/lib/u-boot/$UBOOT_DIR/*" \
+  "./usr/lib/firmware/$AIC_FW_SUB/*" "./lib/firmware/$AIC_FW_SUB/*" \
   "./usr/lib/linux-image-$KVER/*" 2>/dev/null || warn "部分通配未命中（继续校关键项）"
 
 # vmlinuz / initrd
@@ -43,6 +46,17 @@ cp -a "$MODSRC" "$KERNEL_DIR/$KVER"
 
 # u-boot（SPL@LBA256 引导链关键；kernel-actions 不产，必须从 Debian 取）
 cp -a "$TMP/usr/lib/u-boot/$UBOOT_DIR" "$KERNEL_DIR/" 2>/dev/null || die "缺 u-boot/$UBOOT_DIR"
+
+# WiFi 固件（AIC8800D80）：与 u-boot/initrd 同一个 Debian rootfs，顺带提取。
+# 这里 die 而不 warn：驱动用 filp_open 直读，固件缺失是**静默失败**（没有 phy0、
+# 也没有任何报错），CI 必须在这一步就炸掉，不能等到板上才发现 wlan 不在。
+rm -rf "$AIC_FW_DIR"; mkdir -p "$(dirname "$AIC_FW_DIR")"
+if   [ -d "$TMP/usr/lib/firmware/$AIC_FW_SUB" ]; then cp -a "$TMP/usr/lib/firmware/$AIC_FW_SUB" "$AIC_FW_DIR"
+elif [ -d "$TMP/lib/firmware/$AIC_FW_SUB"     ]; then cp -a "$TMP/lib/firmware/$AIC_FW_SUB"     "$AIC_FW_DIR"
+else die "Debian rootfs 里找不到 $AIC_FW_SUB（WiFi 固件）——镜像将没有 wlan 且无任何报错"; fi
+NFW=$(ls "$AIC_FW_DIR" | wc -l)
+[ "$NFW" -ge 10 ] || die "WiFi 固件只有 $NFW 个文件（预期 15），提取不完整"
+echo "   wifi 固件: $NFW 个文件 → $AIC_FW_DIR"
 
 log "提取完成：$KERNEL_DIR"
 ls "$KERNEL_DIR"

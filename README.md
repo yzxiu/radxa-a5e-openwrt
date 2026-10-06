@@ -5,6 +5,9 @@
 
 > 详细调试过程与踩坑分析见 [`docs/OpenWrt-A5E-制作记录.md`](docs/OpenWrt-A5E-制作记录.md)。
 > 本仓库记录**如何复现**这套镜像的全部改动，调试过程中所有定制都在 `scripts/ custom/ patches/` 里落成源码。
+>
+> 专题：**apk 包管理**（chroot 装包、wpad 变体替换、权限/binfmt 坑、可复现性）
+> 单独成篇 → [`docs/apk-包管理-chroot安装-记录与思考.md`](docs/apk-包管理-chroot安装-记录与思考.md)。
 
 ## 方案（方案C）
 
@@ -37,7 +40,8 @@ openwrt-a5e-build/
 │   ├── 30-dropbear-all-interfaces.sh
 │   ├── 40-mount-root-skip.sh
 │   └── 50-modules-ko-convert.sh
-└── docs/OpenWrt-A5E-制作记录.md
+├── docs/OpenWrt-A5E-制作记录.md
+└── docs/apk-包管理-chroot安装-记录与思考.md   # apk/chroot 专题（含推理过程）
 ```
 
 ## 改动总清单（定制点 → 实现位置 → 为什么）
@@ -57,7 +61,13 @@ openwrt-a5e-build/
 | firewall 放行 WAN 管理端口 | `patches/20-firewall-wan-access.sh` | LAN 修好前经 WAN 管理 SSH/LuCI | ✅ |
 | dropbear 监听所有接口 | `patches/30-dropbear-all-interfaces.sh` | 同上（默认只 lan） | ✅ |
 | inittab 加 `ttyAS0` login | `patches/10-inittab-ttyAS0.sh` | 坑8 串口进不了终端 | ✅ |
-| **禁用 plymouth**（开机占 console→askfirst 失败） | 未做 | 坑8 根治 | ⚠ 待办 |
+| **WiFi 固件分发**（AIC8800D80） | `20-extract-kernel.sh` 提取 + `40-assemble` ②c 落 `/lib/firmware/aic8800_fw/SDIO/aic8800D80` | 坑10：驱动用 `filp_open` 直读 `CONFIG_AIC_FW_PATH`（不走 request_firmware），缺固件是**静默失败**——内核异步线程永远轮询不到，没 phy0 也没报错 | ✅ |
+| **装 `iw` + `wifi-scripts`** | `40-assemble` ③b（chroot+apk，qemu-user 模拟 aarch64） | 坑10：25.12 把 `/sbin/wifi` 和 netifd 的 mac80211 handler 拆进 `wifi-scripts`，通用 rootfs 里没有 → `wifi config`/`wifi up` 全 not found | ✅ |
+| **禁用 wpad 降权** | `patches/60-wpad-no-drop-privilege.sh` | 坑10：`/etc/capabilities/wpad.json` 让 procd 把 wpad 降到 network 用户 → hostapd 注册不上 ubus 对象 → `ubus wait_for hostapd` 永久挂住 | ✅ |
+| **wpad 换 full 版** | `40-assemble` ③b（先 `apk del wpad-mesh-mbedtls` 再 `apk add wpad-mbedtls`） | 坑10：预装的 mesh 版是 **minimal**，没编 802.11ac/ax → 5G 时 hostapd 报 40+ 条 `unknown configuration item`、`add_iface failed`，而 ubus 还假报 `up:true` | ✅ |
+| **预置 `/etc/config/wireless`（默认 5G）** | `custom/rootfs/etc/config/wireless` | 坑10：芯片是**单射频双频**（1 个 phy，2.4G/5G 不能同时开），5G 覆盖 ch36–165、2×2、HE80；默认锁 `5g/36/HE80`（36 是非 DFS 信道，起来最快；板上冷启动实测 AP-ENABLED） | ✅ || **禁用 plymouth**（开机占 console→askfirst 失败） | 未做 | 坑8 根治 | ⚠ 待办 |
+| **不设 `option country`** + `country_ie='0'`/`doth='0'` | `custom/rootfs/etc/config/wireless` | 坑11-A：phy0 是 `self-managed`（驱动 `custregd` 默认 true），`iw reg get` 永远 `country 00`；而 hostapd 见到 `country_code=` 就进 `COUNTRY_UPDATE` 等 REG_CHANGE、**1 秒超时后 AP-DISABLED** | ✅ |
+| **修 `find_reusable_wdev` 误判** | `patches/70-wdev-reusable-wdev-fix.sh` | 坑11-B：它把 `operstate=="down"` 当"接口空闲"，而刚启用的 AP 在网桥端口 settling 期间正是 down → 被 `RTM_SETLINK` **改名成 sta0**（dmesg `renamed from phy0-ap0 (while UP)`），AP 凭空消失、hostapd 无限刷 `Failed to set beacon parameters`，而 ubus 仍报 `up:true`。仅 fullmac 驱动会走到（AIC8800 是 fullmac） | ✅ |
 | **Ctrl+C(SIGINT) 不生效**（top 退不出） | 未查 | 坑8 遗留 | ⚠ 待办 |
 
 > 引导参数里 **`root=` 绝不能硬编码**：每次跑 `50-build-image.sh` 都用 blkid 生成
