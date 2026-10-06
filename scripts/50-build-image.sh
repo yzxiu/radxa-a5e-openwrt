@@ -16,8 +16,12 @@ RT="$OWRT/openwrt-a5e-rootfs.tar"; BI="$OUT/build-image"
 
 # build-image 里 tar-in 引用的 rootfs 文件名因来源而异：
 #   本地 rsdk 自建版 = rootfs.tar；radxa release 下载版 = <DEB_BASE>.rootfs.tar。
-# 动态提取该名字，软链我们的 openwrt rootfs 到它 → 两版通吃。
-RN=$(grep -oE '[^"[:space:]]+\.rootfs\.tar' "$BI" | head -1)
+# 直接从 `tar-in <name>` 那一行取名，两种都吃；软链我们的 openwrt rootfs 到它。
+# ⚠ 必须带 `|| true`：set -euo pipefail 下，sed/grep 无命中会让命令替换返回非零，
+#   脚本在赋值那一行就静默 exit 1（零输出），下面那句兜底根本执行不到。
+#   本地就因此踩过：rsdk 版 build-image 引的是纯 rootfs.tar，旧正则
+#   `[^"[:space:]]+\.rootfs\.tar` 要求前缀至少一个字符，匹配不上 → 直接死。
+RN=$(sed -nE 's/^[[:space:]]*tar-in[[:space:]]+([^[:space:]]+\.tar).*/\1/p' "$BI" | head -1 || true)
 [ -n "$RN" ] || RN="rootfs.tar"
 export RN
 echo "   build-image 引用的 rootfs 名：$RN"

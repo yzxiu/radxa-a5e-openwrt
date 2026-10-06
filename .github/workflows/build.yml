@@ -39,6 +39,12 @@ on:
 permissions:
   contents: write
 
+# 同一分支连续推送时，取消还在跑的旧构建（现在所有分支都触发，
+# 不然改一行就堆一个 45 分钟的 run）。main 上也适用：新 push 本就超越旧的。
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 env:
   DEBIAN_FRONTEND: noninteractive
   LIBGUESTFS_BACKEND: direct          # nix libguestfs 直连 qemu，不经 libvirtd
