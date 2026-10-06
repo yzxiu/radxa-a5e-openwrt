@@ -1,1 +1,0 @@
-root=UUID=4739022d-153d-4199-bc4b-35ab086fcddb console=ttyAS0,115200n8 earlyprintk=sunxi-uart,0x2500000 rootwait clk_ignore_unused mac_addr=${mac} mac1_addr=${mac1} loglevel=4 rw earlycon consoleblank=0 console=tty1 coherent_pool=2M irqchip.gicv3_pseudo_nmi=0

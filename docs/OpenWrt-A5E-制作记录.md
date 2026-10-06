@@ -317,9 +317,14 @@ ip addr show br-lan                  # 应自动建好 192.168.1.1
 - **根治需禁用 plymouth**（否则每次开机它都占用 console 导致 askfirst 失败）。
 - 临时验证（不重启）：先等 plymouthd 退出，再 `setsid /usr/libexec/login.sh </dev/ttyAS0 >/dev/ttyAS0 2>&1 &` → ttyAS0 上立刻出现 root shell（实测确认串口可进终端）。
 
-**遗留**：
-- **plymouth 开机干扰未根治**：需禁用 plymouth（卸载包或禁其占用 console），否则每次重启都要手动补 login。
-- **Ctrl+C（SIGINT）疑似不生效**（top 无法退出）：`login.sh` 对 `/dev/ttyAS*` 设 `TERM=vt102`，可能是 termios 的 ISIG/minicom 设置问题，**待查**（不影响基本使用）。
+**遗留**（→ 已由**坑 12** 根治，并更正下面两处当时的错误判断）：
+- ~~plymouth 开机干扰未根治~~ → 坑 12：cmdline 加 `plymouth.enable=0` 即根治。
+- ⚠ **更正**：当时写"开机后 plymouthd 虽自然退出，但 procd 不会补创建 askfirst"——**实测不成立**。
+  plymouthd **根本不会自己退出**（uptime 43 分钟时 pid 178 仍在），askfirst/shell **也确实创建成功了**
+  （pid 362 的 fd0/1/2 都指向 /dev/ttyAS0）。真实机制是**两个进程同时读同一个 tty、互相抢输入**，
+  不是"askfirst 创建失败"。
+- ⚠ **更正**：Ctrl+C 不生效**与 `TERM=vt102`、minicom 设置无关**，是 plymouth 把 tty 置 raw（`ISIG` 关）
+  后从不恢复。详见坑 12。
 - 注意：板子**没有 `getty` 命令**（busybox 精简，OpenWrt 用 procd askfirst 代替），排查时别拿 getty 测。
 
 ---
@@ -341,6 +346,8 @@ Skipping fdtdir /usr/lib/linux-image-6.6.98-1-aw2607/ for failure retrieving dts
    而 kernel-actions release 解出的 a5e dtb 实际在 **`…/linux-image-<KVER>/allwinner/` 子目录**，顶层没有 → `boot/dts/` 拷成空。
 2. **fdtdir 与落点不一致**：`custom/rootfs/boot/extlinux/extlinux.conf` 的 overlay 把 `fdtdir` 指向
    `/usr/lib/linux-image-<KVER>/`，但脚本从没往那儿拷 dtb → fdtdir 指空目录。
+   （这份静态副本已在坑12 时删除：extlinux.conf 现由 `40-assemble` ③ 从 `APPEND_PARAMS` 生成，
+   避免 overlay 覆盖生成物形成两处真相。）
    两者叠加 → dtb 彻底无处可寻。（手工拼装时第 3.3 节本来就是拷到 `usr/lib/linux-image/.../allwinner/`，
    脚本化迁移时把目标改成了 `boot/dts` 却没同步改 fdtdir，埋下不一致。）
 
@@ -567,6 +574,10 @@ ubus     → up:true / pending:false / retry_setup_failed:false
 
 ## 5. 最终配置（extlinux.conf）
 
+> 这两个文件**由 `40-assemble-rootfs.sh` 第③步生成**（参数唯一来源是 `00-lib.sh` 的
+> `APPEND_PARAMS`），不要再往 `custom/rootfs/` 下放静态副本——第④步 overlay 会覆盖生成物，
+> 形成两处真相（坑 12 里就因此差点白改）。
+
 ```
 ## /boot/extlinux/extlinux.conf
 default l0
@@ -574,14 +585,118 @@ menu title U-Boot menu
 prompt 0
 timeout 10
 label l0
-	menu label ImmortalWrt A5E 6.6.98-1-aw2607
+	menu label ImmortalWrt A5E 6.6.98-1-aw2607 (kernel-actions)
 	linux /boot/vmlinuz-6.6.98-1-aw2607
 	initrd /boot/initrd.img-6.6.98-1-aw2607
 	fdtdir /usr/lib/linux-image-6.6.98-1-aw2607/
-	append root=UUID=4739022d-153d-4199-bc4b-35ab086fcddb console=ttyAS0,115200n8 earlyprintk=sunxi-uart,0x2500000 rootwait clk_ignore_unused mac_addr=${mac} mac1_addr=${mac1} loglevel=4 rw earlycon consoleblank=0 console=tty1 coherent_pool=2M irqchip.gicv3_pseudo_nmi=0
+	append root=UUID=PLACEHOLDER console=ttyAS0,115200n8 earlyprintk=sunxi-uart,0x2500000 rootwait clk_ignore_unused mac_addr=${mac} mac1_addr=${mac1} loglevel=4 rw earlycon consoleblank=0 console=tty1 coherent_pool=2M irqchip.gicv3_pseudo_nmi=0 plymouth.enable=0
 ```
 
-**注意**：`root=UUID=4739022d-...` 是**当前这张镜像的 fs UUID**。重新跑 build-image 生成新镜像时 UUID 会变，需重新读真值（`blkid` 或 guestfish 内 blkid）或依赖 build-image 的自动替换。
+同时生成 `/etc/kernel/cmdline`（内容 = `root=UUID=PLACEHOLDER ${APPEND_PARAMS}`）。
+
+**关于 `root=UUID=`**：`out/build-image`（guestfish 脚本）第 39–53 行会 `copy-out` 这两个文件、
+`blkid /dev/sda3` 读真值，然后：
+
+```sh
+sed -i -E -e "s/([[:space:]]*root=[^[:space:]]*[[:space:]]*)/ /g" \
+         -e "s/(append[[:space:]]+)/append root=UUID=$(cat rootfs_uuid) /g"  extlinux.conf
+sed -i -E -e "s/([[:space:]]*root=[^[:space:]]*[[:space:]]*)/ /g" \
+         -e "s/^/root=UUID=$(cat rootfs_uuid) /g"                           cmdline
+```
+
+即**先把原有 `root=…` 整个剥掉、再注入真值**，所以种子里写 `PLACEHOLDER` 还是某个旧 UUID 都无所谓
+（坑 3 里那个 `4739022d-…` 只是历史遗留的种子值）。副产品：`cmdline` 里 `root=UUID=<真值>` 后面
+会有**两个空格**（第一条 sed 留下一个、第二条又在行首插一个），不是手工编辑痕迹。
+
+---
+
+### 坑 12：串口控制台三个症状（输入被吃、方向键失灵、Ctrl+C 无效）——同一个根因 plymouthd 常驻
+
+**现象**（板上 minicom @115200）：
+1. 输入有一部分被吃掉，有时要按两次才进去
+2. 上下键（历史）完全不生效
+3. Ctrl+C 无效，`top` 退不出
+
+**定位：谁在占 ttyAS0**
+
+```sh
+for p in /proc/[0-9]*; do for fd in $p/fd/*; do
+  case "$(readlink $fd)" in */ttyAS0) echo "pid=${p#/proc/} $(cat $p/comm)";; esac
+done; done
+#   pid=178  plymouthd      ← 元凶
+#   pid=362  ash            ← inittab askfirst 起的登录 shell
+```
+
+两个进程同时 open 同一个 tty → **竞争读输入**。
+
+**实测对照**（同一条 `echo HELLO123\r`，14 字节）：
+
+| | 发 14 字节后读回 |
+|---|---|
+| plymouthd 活着 | **1 字节**（只有 `e`），其余被抢走 |
+| `kill 178` 之后 | **32 字节** = 完整回显 + `HELLO123` 输出 + 提示符 |
+
+方向键失灵同理：`↑` 是 3 字节 `ESC [ A`，被两个读者拆散就不成命令。
+
+**为什么 plymouthd 会常驻**（读 initramfs 里的脚本，不靠猜）：
+
+```sh
+# /scripts/init-premount/plymouth
+SPLASH="true"                                     # ← 默认就是 true！
+for ARGUMENT in $(cat /proc/cmdline); do
+  case "${ARGUMENT}" in
+    splash*)                     SPLASH="true"  ;;
+    nosplash*|plymouth.enable=0) SPLASH="false" ;;
+  esac
+done
+if [ "${SPLASH}" = "true" ]; then
+  /usr/sbin/plymouthd --mode=boot --attach-to-session --pid-file=/run/plymouth/pid
+  /usr/bin/plymouth --show-splash
+fi
+
+# /scripts/init-bottom/plymouth
+/usr/bin/plymouth --newroot=${rootmnt}            # ← 只交接，从不 quit
+```
+
+systemd 系统上由 `plymouth-quit.service` 收尾；**本 rootfs 用 procd，没人来收** → plymouthd
+跨过 switch_root 永久存活。这也解释了为什么 rootfs 里 `find / -name 'plymouth*'` **一个都找不到**、
+`/run/plymouth` 也不存在：二进制属于已被释放的 initramfs（`/proc/178/exe` 会是 deleted）。
+
+**Ctrl+C 为什么无效**：plymouth 要捕获按键（ESC 看启动详情），会把 tty 置成 raw 模式
+（`ISIG` 关闭）；它是被 kill 的，没机会恢复 termios，而系统里**没有 `stty`**（busybox 未启用该
+applet，`find` 全盘无），无法手工改回。所以 `kill plymouthd` **只能修好前两个症状，修不好 Ctrl+C**。
+
+实测证据：串口里起 `sleep 60`，发 `0x03`，从 SSH 侧 `ps` 查——**进程仍存活** → SIGINT 未投递。
+（注意区分：行编辑层面的 Ctrl+C 是通的，会回显 `^C` 并清掉续行状态；坏的是给前台进程组投递信号。）
+
+**修复**：cmdline 加 `plymouth.enable=0`（`00-lib.sh` 的 `APPEND_PARAMS`，唯一来源）。
+比"从 initramfs 里删 plymouth hook 再 `update-initramfs -u`"轻，且可回退。
+
+**验证**（改板上 `/boot/extlinux/extlinux.conf` 后重启，逐项实测）：
+
+| 测试 | 修复前 | 修复后 |
+|---|---|---|
+| `pidof plymouthd` | 178 在跑 | **不存在** ✓ |
+| ttyAS0 占用者 | plymouthd + ash | **只有 askfirst/ash** ✓ |
+| 发 `echo HELLO123\r`(14B) | 回 1 字节 | 完整回显 + 输出 ✓ |
+| 方向键 ↑ | 无反应 | 召回上一条 + `ESC[J` ✓ |
+| Ctrl+C 杀 `sleep 60` | 进程存活 | **已被杀** ✓ |
+| Ctrl+C 退 `top` | 退不出 | **回到提示符** ✓ |
+| 串口 banner | 看不到 | 正常显示 ImmortalWrt 横幅 ✓ |
+| WiFi（回归） | — | ap0+sta0 同在 ch36/80MHz、STA 关联、ap0 在 br-lan、renamed=0/beacon_fail=0 ✓ |
+
+**排查中我自己走的弯路**（记下来以免重犯）：
+- 一开始把 `stty -a` 的空输出当成故障，其实是**板上没有 `stty`**；`hostapd_cli`/`wpa_cli` 同理不存在。
+  → 判据：命令无输出时先 `command -v` 确认工具在不在，别急着当故障。
+- 一度断定"板上跑的不是我们的镜像"（因为 `/usr/lib/aic8800` 不存在、有 `/rom`+`/overlay`），
+  实际是**我拿旧版流水线的记忆去比新版**：现在固件落点是 `/lib/firmware/aic8800_fw/SDIO/aic8800D80/`。
+  → 判据：认镜像要用**当前**仓库的断言项，别用记忆里的路径。
+- 一度断定"静态副本里的 `4739022d-…` 是陈旧 UUID，CI 镜像会起不来"——**错**，`build-image` 会 sed
+  剥离并注入真值（见 §5）。→ 判据：断言"某处没做"之前，先把那条链路的脚本读完。
+- 测试脚本自身的坑：`scan_board` 返回的是**末段数字**而非完整 IP，导致 `ssh root@122` 根本没连上、
+  reboot 从未执行，跑出来的"FAIL"全是假的（采集也为空）。判据：失败信息里打印的是 `（122）`
+  而不是完整地址。另外远端脚本用单引号包一整段、内部又有 `awk '…'` 会引号嵌套坏掉，
+  应改用 `ssh host 'sh -s' <<'EOS'`。
 
 ---
 
