@@ -104,7 +104,17 @@ WIFI_PKGS=${WIFI_PKGS:-iw wifi-scripts}
 WIFI_WPAD_PKG=${WIFI_WPAD_PKG:-wpad-mbedtls}
 
 # ---- 引导参数（extlinux append；root=UUID 由 build-image 用 blkid 注入，勿硬编码）----
-APPEND_PARAMS="console=ttyAS0,115200n8 earlyprintk=sunxi-uart,0x2500000 rootwait clk_ignore_unused mac_addr=\${mac} mac1_addr=\${mac1} loglevel=4 rw earlycon consoleblank=0 console=tty1 coherent_pool=2M irqchip.gicv3_pseudo_nmi=0"
+# plymouth.enable=0 —— 不加会坏掉整个串口控制台（板上实测三个症状，加参数后全部恢复）：
+#   initramfs 的 /scripts/init-premount/plymouth 里 SPLASH 默认就是 "true"，只有 cmdline
+#   出现 nosplash* 或 plymouth.enable=0 才置 false；而 /scripts/init-bottom/plymouth 只做
+#   `plymouth --newroot=${rootmnt}` 交接、**从不 quit**——systemd 系统上由 plymouth-quit.service
+#   收尾，本 rootfs 用 procd，没人收 → plymouthd 跨过 switch_root 常驻，一直 open 着
+#   /dev/ttyAS0，和 inittab askfirst 起的 shell 抢同一个 tty 的输入：
+#     · 输入被吃（实测同一条 `echo HELLO123\r` 14 字节：plymouthd 活着只回 1 字节，杀掉回 32 字节）
+#     · 方向键失效（ESC [ A 三字节被两个读者拆散，不成命令）
+#     · Ctrl+C 杀不掉前台进程（plymouth 为捕获按键把 tty 置 raw、ISIG 关闭，被杀时不恢复
+#       termios；实测 `sleep 60` 收到 0x03 后仍存活，`top` 也退不出）
+APPEND_PARAMS="console=ttyAS0,115200n8 earlyprintk=sunxi-uart,0x2500000 rootwait clk_ignore_unused mac_addr=\${mac} mac1_addr=\${mac1} loglevel=4 rw earlycon consoleblank=0 console=tty1 coherent_pool=2M irqchip.gicv3_pseudo_nmi=0 plymouth.enable=0"
 
 log()  { printf '\n\033[1;36m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33m[warn] %s\033[0m\n' "$*" >&2; }

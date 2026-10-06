@@ -145,6 +145,33 @@ jobs:
           else
             echo "✓ wireless 未设 option country"
           fi
+          # ---- 引导配置：plymouth 必须关，否则串口控制台不可用 ----
+          # initramfs 的 /scripts/init-premount/plymouth 里 SPLASH 默认就是 "true"，只有
+          # cmdline 出现 nosplash* / plymouth.enable=0 才置 false；而 init-bottom/plymouth
+          # 只做 --newroot 交接、从不 quit（systemd 上由 plymouth-quit.service 收尾，本
+          # rootfs 用 procd，没人收）→ plymouthd 跨过 switch_root 常驻，一直 open 着
+          # /dev/ttyAS0 与 askfirst 的 shell 抢输入。板上实测：同一条 14 字节命令，
+          # plymouthd 活着只回 1 字节；且它把 tty 置 raw(ISIG off) 后不恢复，
+          # 导致 Ctrl+C 杀不掉前台进程（sleep/top 都退不出）、方向键转义序列被拆散。
+          chk  "boot/extlinux/extlinux\.conf$" "/boot/extlinux/extlinux.conf 存在（build-image 要 copy-out）"
+          chk  "etc/kernel/cmdline$"           "/etc/kernel/cmdline 存在（build-image 要 copy-out）"
+          for f in ./boot/extlinux/extlinux.conf ./etc/kernel/cmdline; do
+            if tar -xOf "$T" "$f" 2>/dev/null | grep -q "plymouth\.enable=0"; then
+              echo "✓ $f 含 plymouth.enable=0"
+            else
+              echo "✗ $f 缺 plymouth.enable=0（plymouthd 会常驻占串口：输入被吃、方向键失效、Ctrl+C 无效）"; exit 1
+            fi
+          done
+          # 两份必须同源（都来自 00-lib.sh 的 APPEND_PARAMS）。历史上这两个文件曾在
+          # custom/rootfs/ 下有静态副本并被 overlay 覆盖回去，形成两处真相。
+          norm() { printf '%s' "$1" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'; }
+          A=$(norm "$(tar -xOf "$T" ./boot/extlinux/extlinux.conf 2>/dev/null | sed -nE 's/^[[:space:]]*append[[:space:]]+//p' | sed -E 's/[[:space:]]*root=[^[:space:]]*[[:space:]]*/ /g')")
+          C=$(norm "$(tar -xOf "$T" ./etc/kernel/cmdline 2>/dev/null | sed -E 's/[[:space:]]*root=[^[:space:]]*[[:space:]]*/ /g')")
+          if [ "$A" = "$C" ]; then
+            echo "✓ extlinux append 与 /etc/kernel/cmdline 参数一致"
+          else
+            echo "✗ 两份引导参数不一致（有一处没跟着 APPEND_PARAMS 改）"; echo "  append : $A"; echo "  cmdline: $C"; exit 1
+          fi
           rm -f "$L"
 
       - name: stage rootfs.tar into workspace

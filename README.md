@@ -31,9 +31,11 @@ openwrt-a5e-build/
 │   ├── 50-build-image.sh        # guestfish 打包（有就地/无则借 rsdk 容器 direnv）→ owrt-a5e.img
 │   └── 90-offline-edit-image.sh # 调试工具：离线 debugfs 改成品镜像（秒级）
 ├── custom/rootfs/               # 整文件定制（overlay 直接覆盖到 rootfs）
-│   ├── boot/extlinux/extlinux.conf
-│   ├── etc/kernel/cmdline
+│   ├── etc/config/wireless
 │   └── etc/init.d/bridge-modules
+│       # ⚠ 别在这里放 boot/extlinux/extlinux.conf 或 etc/kernel/cmdline：
+│       #   overlay（第④步）会把第③步生成的覆盖掉 → 两处真相，改 APPEND_PARAMS 不生效（坑12）。
+│       #   这两个文件由 40-assemble 第③步从 00-lib.sh 的 APPEND_PARAMS 生成。
 ├── patches/                     # 局部修改（sed 补丁，按序应用，每个带 why）
 │   ├── 10-inittab-ttyAS0.sh
 │   ├── 20-firewall-wan-access.sh
@@ -65,13 +67,16 @@ openwrt-a5e-build/
 | **装 `iw` + `wifi-scripts`** | `40-assemble` ③b（chroot+apk，qemu-user 模拟 aarch64） | 坑10：25.12 把 `/sbin/wifi` 和 netifd 的 mac80211 handler 拆进 `wifi-scripts`，通用 rootfs 里没有 → `wifi config`/`wifi up` 全 not found | ✅ |
 | **禁用 wpad 降权** | `patches/60-wpad-no-drop-privilege.sh` | 坑10：`/etc/capabilities/wpad.json` 让 procd 把 wpad 降到 network 用户 → hostapd 注册不上 ubus 对象 → `ubus wait_for hostapd` 永久挂住 | ✅ |
 | **wpad 换 full 版** | `40-assemble` ③b（先 `apk del wpad-mesh-mbedtls` 再 `apk add wpad-mbedtls`） | 坑10：预装的 mesh 版是 **minimal**，没编 802.11ac/ax → 5G 时 hostapd 报 40+ 条 `unknown configuration item`、`add_iface failed`，而 ubus 还假报 `up:true` | ✅ |
-| **预置 `/etc/config/wireless`（默认 5G）** | `custom/rootfs/etc/config/wireless` | 坑10：芯片是**单射频双频**（1 个 phy，2.4G/5G 不能同时开），5G 覆盖 ch36–165、2×2、HE80；默认锁 `5g/36/HE80`（36 是非 DFS 信道，起来最快；板上冷启动实测 AP-ENABLED） | ✅ || **禁用 plymouth**（开机占 console→askfirst 失败） | 未做 | 坑8 根治 | ⚠ 待办 |
+| **预置 `/etc/config/wireless`（默认 5G）** | `custom/rootfs/etc/config/wireless` | 坑10：芯片是**单射频双频**（1 个 phy，2.4G/5G 不能同时开），5G 覆盖 ch36–165、2×2、HE80；默认锁 `5g/36/HE80`（36 是非 DFS 信道，起来最快；板上冷启动实测 AP-ENABLED） | ✅ |
+| **禁用 plymouth**（cmdline `plymouth.enable=0`） | `00-lib.sh` 的 `APPEND_PARAMS`（`40-assemble` ③ 生成 extlinux.conf + `/etc/kernel/cmdline`） | 坑12：initramfs 的 `init-premount/plymouth` 里 `SPLASH` **默认就是 `true`**，只有 `nosplash`/`plymouth.enable=0` 才置 false；而 `init-bottom/plymouth` 只做 `--newroot` 交接、**从不 quit**（systemd 上由 `plymouth-quit.service` 收尾，本 rootfs 用 procd，没人收）→ plymouthd 跨过 switch_root 常驻，与 askfirst 的 shell **同时占着 `/dev/ttyAS0` 抢输入**。实测同一条 14 字节命令：plymouthd 活着只回 **1 字节**，杀掉回 **32 字节**；方向键的 `ESC [ A` 同理被拆散 | ✅ |
 | **不设 `option country`** + `country_ie='0'`/`doth='0'` | `custom/rootfs/etc/config/wireless` | 坑11-A：phy0 是 `self-managed`（驱动 `custregd` 默认 true），`iw reg get` 永远 `country 00`；而 hostapd 见到 `country_code=` 就进 `COUNTRY_UPDATE` 等 REG_CHANGE、**1 秒超时后 AP-DISABLED** | ✅ |
 | **修 `find_reusable_wdev` 误判** | `patches/70-wdev-reusable-wdev-fix.sh` | 坑11-B：它把 `operstate=="down"` 当"接口空闲"，而刚启用的 AP 在网桥端口 settling 期间正是 down → 被 `RTM_SETLINK` **改名成 sta0**（dmesg `renamed from phy0-ap0 (while UP)`），AP 凭空消失、hostapd 无限刷 `Failed to set beacon parameters`，而 ubus 仍报 `up:true`。仅 fullmac 驱动会走到（AIC8800 是 fullmac） | ✅ |
-| **Ctrl+C(SIGINT) 不生效**（top 退不出） | 未查 | 坑8 遗留 | ⚠ 待办 |
+| **Ctrl+C(SIGINT) 不生效**（top 退不出） | 同上（`plymouth.enable=0`） | 坑12：plymouth 为捕获按键把 tty 置 raw（**`ISIG` 关**），被杀时不恢复 termios，而板上**没有 `stty`** 可改回 → SIGINT 根本不投递（实测 `sleep 60` 收到 `0x03` 后仍存活）。关掉 plymouth 后实测 Ctrl+C 能杀 `sleep`、能退 `top`。**注意：`kill plymouthd` 治不了这条**（termios 已坏），必须让它根本不启动 | ✅ |
 
-> 引导参数里 **`root=` 绝不能硬编码**：每次跑 `50-build-image.sh` 都用 blkid 生成
-> 新随机 UUID（坑3 血泪）。离线编辑 extlinux 前，务必 `blkid`/`debugfs` 读真实值。
+> 引导参数唯一来源是 `00-lib.sh` 的 `APPEND_PARAMS`；`40-assemble` ③ 用它生成
+> `/boot/extlinux/extlinux.conf` 和 `/etc/kernel/cmdline`（`root=UUID=PLACEHOLDER`）。
+> `out/build-image` 再用 `blkid` 读 sda3 真值、**sed 剥掉原有 `root=…` 后注入**，所以种子写什么
+> 都无所谓（坑3）。离线编辑已烧录的板子时，仍要 `blkid`/`debugfs` 读真实 UUID，别硬编码。
 
 ## 复现步骤
 
