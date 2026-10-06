@@ -52,7 +52,13 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             curl ca-certificates xz-utils cpio rsync python3 tar coreutils \
-            e2fsprogs util-linux parted
+            e2fsprogs util-linux parted \
+            qemu-user-static binfmt-support
+          # 40 步要 chroot 进 aarch64 rootfs 跑 apk（wifi-scripts/iw 的 post-install
+          # 必须在目标环境里执行），靠 qemu-user + binfmt_misc 做用户态模拟。
+          # 这里故意不做「检查 /proc/sys/fs/binfmt_misc/qemu-aarch64 是否存在」：
+          # binfmt_misc 是宋主全局机制，该文件看不到不等于跑不了（实测过这个假
+          # 阴性）。真正的功能检查放在 40 步 chroot 之前（跑 /bin/uname -m）。
 
       - name: setup nix (提供 libguestfs-with-appliance)
         uses: DeterminateSystems/nix-installer-action@main
@@ -86,14 +92,25 @@ jobs:
       - name: 40 assemble OpenWrt rootfs.tar
         run: bash scripts/40-assemble-rootfs.sh
 
-      - name: 校验拼装产物（dtb 落点 / bridge 无 workaround）
+      - name: 校验拼装产物（dtb / bridge / WiFi 四件套）
         run: |
           set -euo pipefail
           T="../owrt/openwrt-a5e-rootfs.tar"
           [ -f "$T" ] || { echo "缺 rootfs.tar"; exit 1; }
-          tar -tf "$T" | grep -E "usr/lib/linux-image-[^/]+/allwinner/sun55i-a527-cubie-a5e\.dtb" \
-            && echo "✓ a5e dtb 在 usr/lib/linux-image/allwinner/" || { echo "✗ dtb 缺"; exit 1; }
-          if tar -tf "$T" | grep -q "etc/init.d/bridge-modules"; then echo "✗ 不该有 bridge workaround"; exit 1; else echo "✓ 无 bridge workaround（kernel-actions 已 builtin）"; fi
+          L=$(mktemp); tar -tf "$T" > "$L"
+          chk()  { grep -qE "$1" "$L" && echo "✓ $2" || { echo "✗ 缺：$2"; exit 1; }; }
+          nchk() { if grep -qE "$1" "$L"; then echo "✗ 不该有：$2"; exit 1; else echo "✓ $2"; fi; }
+          chk  "usr/lib/linux-image-[^/]+/allwinner/sun55i-a527-cubie-a5e\.dtb" "a5e dtb 在 usr/lib/linux-image/allwinner/"
+          nchk "etc/init\.d/bridge-modules" "无 bridge workaround（kernel-actions 已 builtin）"
+          # ---- WiFi：缺任一项都是「镜像能启动但 wlan 静默不在」，必须在这里卡住 ----
+          chk  "lib/firmware/aic8800_fw/SDIO/aic8800D80/fmacfw_8800d80_u02\.bin" "AIC8800D80 固件在位（驱动 filp_open 直读）"
+          chk  "(^|/)sbin/wifi$"                          "/sbin/wifi（wifi-scripts）"
+          chk  "(^|/)usr/sbin/iw$"                        "/usr/sbin/iw"
+          chk  "lib/netifd/wireless/mac80211\.sh"         "netifd mac80211 handler"
+          chk  "etc/capabilities/wpad\.json\.disabled"    "wpad 降权已禁用"
+          nchk "etc/capabilities/wpad\.json$"             "wpad.json 未残留（否则 hostapd 注册不上 ubus）"
+          chk  "etc/config/wireless$"                     "/etc/config/wireless 已预置"
+          rm -f "$L"
 
       - name: stage rootfs.tar into workspace
         run: mkdir -p dist && cp ../owrt/openwrt-a5e-rootfs.tar dist/

@@ -374,6 +374,42 @@ debugfs -R "stat /usr/lib/linux-image-$KVER/allwinner/sun55i-a527-cubie-a5e.dtb"
 
 ---
 
+### 坡 10：内核里 WiFi 驱动 builtin 了，wlan 却还是不在（三层静默失败）
+
+kernel 仓把 AIC8800 驱动整体 builtin 后（`vendor/aic8800`，异步线程等真 rootfs
+再初始化），板上依然 `ls /sys/class/ieee80211/` 为空。查下来是**三层各自静默失败**，
+每一层都不报错，叠加起来就是“什么都没有”：
+
+| 层 | 缺什么 | 为何不报错 |
+|---|---|---|
+| 固件 | `/lib/firmware/aic8800_fw/SDIO/aic8800D80/`（15 个文件） | 驱动用 **`filp_open` 直读**（不是 `request_firmware`），路径写死在 `CONFIG_AIC_FW_PATH`。内核里的异步初始化线程就是靶轮询这个目录判断“真 rootfs 挂好了”，目录不存在 → **它就一直等，一条日志都不打** |
+| 用户态包 | `wifi-scripts`（提供 `/sbin/wifi` + netifd 的 `mac80211.sh`）、`iw` | ImmortalWrt 25.12 把这些从 base-files 拆出去了，armsr 通用 rootfs 里没有 → `wifi config`/`wifi up` 全是 `not found`，netifd 根本没有无线 handler |
+| wpad 降权 | `/etc/capabilities/wpad.json` | procd 按它把 wpad 降到 `network` 用户 + 受限 capability 集，hostapd 在非 root 下**注册不上 ubus 对象** → `ubus wait_for hostapd` 永久挂住，AP 起了也用不了 |
+
+外加一层配置陷阱：`wifi config` 自动探测会把这颗 **2.4G 单频**芯片猜成
+`band=5g / channel=36 / htmode=HE80`，hostapd 直接起不来。板上实测可用组合是
+`2g / 6 / HT20`，所以预置 `/etc/config/wireless`，不让它猜。
+
+**固化位置**：固件 `20-extract-kernel.sh` 提取 + `40-assemble` ②c 落盘；包 `40` ③b
+（chroot+apk，qemu-user 跑 aarch64，因为 `wifi-scripts`/`iw` 的 post-install 脚本
+必须在目标环境里执行）；wpad `patches/60-wpad-no-drop-privilege.sh`；配置
+`custom/rootfs/etc/config/wireless`。CI 里加了 9 条断言卡住这些（缺任一项就红），
+因为这类失败的共同特征就是**不报错**。
+
+**顺带查清但不修的两件事**：
+
+- **不装 `wireless-regdb`**：驱动 `rwnx_mod_params.c` 里 `COMMON_PARAM(custregd, true, true)`
+  默认为真（上游 `MODULE_PARM_DESC` 写的 "Default: 0" 是过时的），phy0 会设
+  `REGULATORY_WIPHY_SELF_MANAGED` 用驱动自带 regdomain，cfg80211 的 `regulatory.db`
+  对它不起作用；且本内核 `CONFIG_CFG80211_REQUIRE_SIGNED_REGDB=y`，而 OpenWrt 的
+  `wireless-regdb` 只给 `regulatory.db`、不给 `.p7s`（上游 tarball 才成对，且与
+  OpenWrt 重建过的 db 字节不一致，不能混用）→ 装了照样被拒。
+- **`libcrc32c: exports duplicate symbol crc32c`**：initramfs 是从 RadxaOS 按原始
+  config 打的包，里面还带着 `libcrc32c.ko.xz`；而内核因为 `NF_TABLES=y`
+  `select LIBCRC32C` 已把 crc32c 编进 vmlinux → 加载即撞车。initrd 里 117 个模块
+  **只有这 1 个**冲突，且挂 root 所需的 `MMC_BLOCK`/`EXT4_FS`/`JBD2` 全已 builtin，
+  那 46MB 未压缩 cpio 每次开机白解包。属可选优化（精简 initrd），非阻塞。
+
 ## 5. 最终配置（extlinux.conf）
 
 ```
@@ -404,6 +440,8 @@ label l0
 - ✅ SSH 可登录（root，默认无密码）
 - ✅ 双千兆网口内核识别（eth0/eth1 都 link up）
 - ✅ bridge 模块加载（修复后），br-lan 可建，LAN 可用
+- ✅ WiFi（AIC8800D80）：冷启动零干预自动起 AP、桥进 br-lan（驱动 builtin +
+  坡 10 那四件用户态资产；板上实测 ~8s 到 AP-ENABLED，`lsmod | grep -c aic` = 0）
 
 ### 6.2 已知问题 / 待办
 
@@ -411,7 +449,7 @@ label l0
 |---|---|---|
 | 串口 shell 不响应 | ✅ 已定位，部分修复 | 双层根因：inittab 缺 `ttyAS0`（Allwinner BSP 命名）+ plymouthd 开机占用 console（详见坑 8）。已在镜像 inittab 加 `ttyAS0` 行（sha 7d7a34a5）；**plymouth 禁用未做**（每次开机需手动补 login），Ctrl+C 信号待查。不影响 SSH/LuCI 管理 |
 | LAN/br-lan 建不起来 | ✅ 已修复待烧录验证 | 根因是 .ko.xz 模块 + modprobe 依赖解析失灵（详见坑 7）。已固化：.ko 转换 + `init.d/bridge-modules` 启动预加载（START=15），**需重新烧录**验证 br-lan 自动建 |
-| WiFi（AIC8800） | 未验证 | 模块已转 .ko 可加载，但固件/配置未测 |
+| WiFi（AIC8800） | ✅ 已修复 | 驱动 builtin（kernel 仓）+ 固件/用户态包/wpad 降权/预置配置四件套（本仓，详见坡 10）。**默认是开放 AP**（SSID=ImmortalWrt，encryption=none），上线请立即改加密 |
 | rootfs 首次启动扩容 | 部分 | GROWROOT 扩分区成功，但 OpenWrt 无 cloud-initramfs-growroot 的 resize 后续，首次需完整跑完 |
 | MAC 地址随机 | 已知 | eth0 用随机 MAC（`Use random mac address`），每次启动可能变 |
 | root 无密码 | 安全风险 | 默认 root 空密码，需 `passwd` 设置 |

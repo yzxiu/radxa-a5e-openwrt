@@ -1,0 +1,27 @@
+# 预置无线配置（板载 AIC8800D80）
+#
+# 为什么不让 `wifi config` 自动生成：它会探测成 band=5g / channel=36 / htmode=HE80，
+# 而 AIC8800D80 是 **2.4G 单频**芯片、band1 上也不支持 HE —— 生成出来的配置
+# hostapd 起不来（iface 无法进 ENABLED）。板上实测可用的组合就是 2g/6/HT20。
+#
+# option path 必须与实际 SDIO 拓扑一致（板上 `iw phy` / `uci show wireless` 核对过）：
+#   platform/soc@3000000/4021000.sdmmc/mmc_host/mmc2/mmc2:390b/mmc2:390b:1
+#
+# ⚠ 出厂默认是开放 AP（encryption none，SSID=ImmortalWrt）。首次上线请立即在
+#   LuCI 或 `uci set wireless.default_radio0.encryption=psk2` 改成加密。
+
+config wifi-device 'radio0'
+	option type 'mac80211'
+	option path 'platform/soc@3000000/4021000.sdmmc/mmc_host/mmc2/mmc2:390b/mmc2:390b:1'
+	option band '2g'
+	option channel '6'
+	option htmode 'HT20'
+	option country 'CN'
+
+config wifi-iface 'default_radio0'
+	option device 'radio0'
+	option network 'lan'
+	option mode 'ap'
+	option ssid 'ImmortalWrt'
+	option encryption 'none'
+	option disabled '0'

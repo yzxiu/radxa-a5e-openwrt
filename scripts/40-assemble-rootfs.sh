@@ -35,7 +35,21 @@ log "KSRC=$KSRC  KVER=$KVER  vmlinuz=$(basename "$VMLINUZ")"
 log "① 解开 openwrt 通用 rootfs →（全新临时装配目录，避开历史 root 属主残留）"
 # 每次用独立临时目录装配：既干净可复现，又绕开 owrt/rootfs 里可能存在的
 # 非本用户可删的 root 属主文件（guestfish/sudo 遗留）。
-ROOTFS_DIR=$(mktemp -d "$OWRT/.assemble.XXXXXX"); trap 'rm -rf "$ROOTFS_DIR"' EXIT
+ROOTFS_DIR=$(mktemp -d "$OWRT/.assemble.XXXXXX")
+# 安全清理：③b 会在 ROOTFS_DIR 下 bind mount proc/sys/dev。若卸载失败还照常
+# rm -rf，会顺着 bind mount 删到宋主的 /proc —— 必须先确认无残留挂载点再删。
+cleanup_rootfs() {
+  local d
+  for d in dev sys proc; do
+    mountpoint -q "$ROOTFS_DIR/$d" 2>/dev/null && \
+      { umount -l "$ROOTFS_DIR/$d" 2>/dev/null || sudo umount -l "$ROOTFS_DIR/$d" 2>/dev/null || true; }
+  done
+  if mount | grep -qF "$ROOTFS_DIR/"; then
+    warn "$ROOTFS_DIR 下仍有挂载残留，跳过 rm -rf（请手工 umount 后清理）"; return 0
+  fi
+  rm -rf "$ROOTFS_DIR"
+}
+trap cleanup_rootfs EXIT
 tar -xf "$OWRT/$OWRT_TAR" -C "$ROOTFS_DIR"
 
 log "② 放入内核（boot/ + lib/modules + usr/lib/linux-image dtb）"
@@ -63,6 +77,16 @@ log "②b 放入 u-boot（build-image 从 /usr/lib/u-boot/ copy-out 后写 SPL@L
 mkdir -p "$ROOTFS_DIR/usr/lib/u-boot"
 cp -a "$(dirname "$UBOOT_SRC")/$(basename "$UBOOT_SRC")" "$ROOTFS_DIR/usr/lib/u-boot/"
 
+log "②c 放入 WiFi 固件（AIC8800D80）"
+# 驱动用 filp_open 直读 CONFIG_AIC_FW_PATH（不走 request_firmware），落点必须与
+# kernel 仓 configs/a5e-openwrt.config 里的路径逐字一致。缺了不会报错，
+# 只会让内核里的异步初始化线程永远轮询不到固件 → 没有 phy0。
+[ -d "$AIC_FW_DIR" ] || die "缺 WiFi 固件 $AIC_FW_DIR，先跑 20-extract-kernel.sh"
+mkdir -p "$ROOTFS_DIR/lib/firmware/$(dirname "$AIC_FW_SUB")"
+rm -rf "$ROOTFS_DIR/lib/firmware/$AIC_FW_SUB"
+cp -a "$AIC_FW_DIR" "$ROOTFS_DIR/lib/firmware/$AIC_FW_SUB"
+echo "   固件 $(ls "$ROOTFS_DIR/lib/firmware/$AIC_FW_SUB" | wc -l) 个 → /lib/firmware/$AIC_FW_SUB"
+
 log "③ 写引导配置 extlinux.conf（root= 用占位，build-image 用 blkid 注入真实 UUID）"
 mkdir -p "$ROOTFS_DIR/boot/extlinux"
 {
@@ -74,6 +98,41 @@ mkdir -p "$ROOTFS_DIR/boot/extlinux"
   echo "    fdtdir /usr/lib/linux-image-$KVER/"
   echo "    append root=PARTUUID=PLACEHOLDER ${APPEND_PARAMS}"
 } > "$ROOTFS_DIR/boot/extlinux/extlinux.conf"
+
+log "③b chroot 内 apk 安装用户态必装包：$WIFI_PKGS"
+# 为何要 chroot：wifi-scripts/iw 都有 post-install 脚本（建符号链、注册 hotplug），
+# 手工解 .apk 会漏掉脚本和 apk DB 记录。宋主是 x86_64，靠 qemu-user + binfmt
+# 跑 aarch64（CI 里 apt 装 qemu-user-static；本地容器/devcontainer 已具备）。
+# 放在 overlay（④）之前：若包自带同名配置，以我们的 overlay 为准。
+SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo"
+command -v chroot >/dev/null || die "缺 chroot"
+for d in proc sys dev; do
+  mkdir -p "$ROOTFS_DIR/$d"
+  $SUDO mount --bind "/$d" "$ROOTFS_DIR/$d" 2>/dev/null || true
+done
+# /etc/resolv.conf 是指向 /tmp/resolv.conf 的符号链接（镜像里尚未生成），
+# 直接 cp 会报 dangling symlink → 写到链接目标
+mkdir -p "$ROOTFS_DIR/tmp"
+$SUDO cp /etc/resolv.conf "$ROOTFS_DIR/tmp/resolv.conf"
+# 真功能检查：chroot 里能不能跑 aarch64 二进制。
+# ⚠ 别用 `[ -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]` 判断——binfmt_misc 是宋主全局
+# 机制，容器里即使看不到注册文件（--privileged 下 /proc/sys/fs/binfmt_misc 可能没挂
+# 进来）执行照样能成功；反之文件在也可能解释器缺失。实测过这个假阴性。
+$SUDO chroot "$ROOTFS_DIR" /bin/uname -m >/dev/null 2>&1 \
+  || die "chroot 里跑不了 aarch64（qemu-user/binfmt 未就绪）——装 qemu-user-static 并确认 binfmt 已注册"
+# 部分 feed（amlogic/video）在本 target 不存在，apk 会刷 WARNING 但不影响安装
+$SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add $WIFI_PKGS \
+  || die "chroot apk add 失败（查 qemu-user-static/binfmt 是否可用、网络是否通）"
+for d in dev sys proc; do
+  $SUDO umount "$ROOTFS_DIR/$d" 2>/dev/null || $SUDO umount -l "$ROOTFS_DIR/$d" 2>/dev/null || true
+done
+# 清 chroot 痕迹（否则会被打进镜像）
+$SUDO rm -f  "$ROOTFS_DIR/tmp/resolv.conf"
+$SUDO rm -rf "$ROOTFS_DIR/tmp/cache" "$ROOTFS_DIR/tmp/log" "$ROOTFS_DIR/etc/apk/cache"
+for f in /sbin/wifi /usr/sbin/iw /lib/netifd/wireless/mac80211.sh; do
+  [ -e "$ROOTFS_DIR$f" ] || die "包装上了但缺 $f（WIFI_PKGS 不对？）"
+done
+echo "   ✓ /sbin/wifi + /usr/sbin/iw + mac80211.sh 就位"
 
 log "④ 应用整文件定制 custom/rootfs/*（overlay 覆盖）"
 cp -a "$CUSTOM/." "$ROOTFS_DIR/" 2>/dev/null || true
