@@ -407,8 +407,11 @@ center1: 5210 MHz`；hostapd 配置里 `hw_mode=a`、`ieee80211ac=1`、`ieee8021
 信道 36 是**非 DFS** 信道（52–144 要 60s CAC 雷达检测），所以默认就用它。
 
 ⚠ 换 wpad 有两个坑，都在板上踩过：
-1. apk 不允许两个 provide `hostapd` 的包共存，`apk add wpad-mbedtls` 只打印
-   conflicts 分析就返回、**退出码还不报错** → 必须先 `apk del wpad-mesh-mbedtls`。
+1. apk 不允许两个 provide `hostapd`/`wpa-supplicant` 的包共存，也**不会自动替换**：
+   直接 `apk add wpad-mbedtls` 会报 `ERROR: unable to select packages:` + conflicts
+   分析、**退出码 2**、什么都不装（板上实测）→ 必须先 `apk del wpad-mesh-mbedtls`。
+   （更正：早先这里写成"退出码不报错、静默什么都不做"，是我当时用 `| grep | tail -8`
+   观测的——退出码被管道末端吃掉、`ERROR:` 首行被 tail 截掉，属测量错误。）
 2. 换包不会重启已在跑的 hostapd（`wifi down/up` 也不重启守护进程，netifd 是通过
    ubus `hostapd.add_iface` 去找**老进程**），实测老进程的 `/proc/<pid>/exe` 显示
    `/usr/sbin/wpad (deleted)` → 必须 `/etc/init.d/wpad restart` 才生效。

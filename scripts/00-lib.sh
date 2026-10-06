@@ -97,8 +97,9 @@ WIFI_PKGS=${WIFI_PKGS:-iw wifi-scripts}
 # `hostapd.add_iface failed` → iw dev 里 phy0-ap0 **没有 channel 行**（根本没在发），
 # 而 ubus 却报 up:true —— 典型假象，必须用 iw dev 才算数。
 # wpad-mbedtls 描述是 "full featured"，实测 ac+ax 都在，HE80/ch36 能 AP-ENABLED。
-# 注意：apk 不允许两个 provide hostapd 的包共存，`apk add wpad-mbedtls` 只会打印
-# conflicts 分析然后什么都不做（退出码还不报错），**必须先 apk del 再 add**。
+# 注意：apk 不允许两个 provide hostapd/wpa-supplicant 的包共存，也**不会自动替换**——
+# 直接 `apk add wpad-mbedtls` 会报 `ERROR: unable to select packages:` + conflicts 分析、
+# **退出码 2**、什么都不装（板上实测）。所以必须先 `apk del` 旧变体再 add。
 # 另：换了 wpad 后 apk 会重新落地 /etc/capabilities/wpad.json，patches/60 会再改名。
 WIFI_WPAD_PKG=${WIFI_WPAD_PKG:-wpad-mbedtls}
 

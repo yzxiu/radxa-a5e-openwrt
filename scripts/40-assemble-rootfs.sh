@@ -173,8 +173,9 @@ ensure_aarch64_chroot() {
 ensure_aarch64_chroot \
   || die "chroot 里跑不了 aarch64（上方有诊断）——需 qemu-user + binfmt_misc 就绪"
 # 先卸掉基础 rootfs 预装的 wpad 变体（wpad-mesh-mbedtls = minimal，无 802.11ac/ax），
-# 再装 full 版。apk 不让两个 provide hostapd 的包共存，而且冲突时只打印分析、
-# 退出码还不报错（实测），所以必须显式 del，并在装完后校验包 DB。
+# 再装 full 版。apk 不让两个 provide hostapd/wpa-supplicant 的包共存、也不会自动
+# 替换：直接 add 会 `ERROR: unable to select packages:` + 退出码 2（板上实测），
+# 所以必须先显式 del。装完再查一次包 DB 只是兜底（防 del 循环没生效）。
 INSTALLED=$($SUDO chroot "$ROOTFS_DIR" /usr/bin/apk info 2>/dev/null || true)
 for v in $(printf '%s\n' "$INSTALLED" | grep -E '^wpad-' || true); do
   [ "$v" = "$WIFI_WPAD_PKG" ] && continue
@@ -193,8 +194,9 @@ $SUDO rm -rf "$ROOTFS_DIR/tmp/cache" "$ROOTFS_DIR/tmp/log" "$ROOTFS_DIR/etc/apk/
 for f in /sbin/wifi /usr/sbin/iw /lib/netifd/wireless/mac80211.sh; do
   [ -e "$ROOTFS_DIR$f" ] || die "包装上了但缺 $f（WIFI_PKGS 不对？）"
 done
-# wpad 必须真的换成了 full 版：apk 遇到 conflicts 会静默什么都不做（上面已处理，
-# 但这里再卡一道）—— 否则 5G 会在板上静默起不来，而 CI 全绿。
+# 兜底校验：wpad 确实换成了 full 版。（apk 冲突时是会 exit 2 报错的，上面那句
+# `|| die` 已能拦住；这里再查一次包 DB，是防"del 循环因包名变化而空转"这类情况
+# —— 那种情况下 add 反而会成功装上两个变体之一，CI 全绿而板上 5G 静默起不来。）
 INSTALLED=$($SUDO chroot "$ROOTFS_DIR" /usr/bin/apk info 2>/dev/null || true)
 printf '%s\n' "$INSTALLED" | grep -qx "$WIFI_WPAD_PKG" \
   || die "wpad 未换成 $WIFI_WPAD_PKG（当前：$(printf '%s\n' "$INSTALLED" | grep -E '^wpad' | tr '\n' ' ')）"
