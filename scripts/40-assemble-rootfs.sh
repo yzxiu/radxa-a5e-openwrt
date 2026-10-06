@@ -37,7 +37,7 @@ log "① 解开 openwrt 通用 rootfs →（全新临时装配目录，避开历
 # 非本用户可删的 root 属主文件（guestfish/sudo 遗留）。
 ROOTFS_DIR=$(mktemp -d "$OWRT/.assemble.XXXXXX")
 # 安全清理：③b 会在 ROOTFS_DIR 下 bind mount proc/sys/dev。若卸载失败还照常
-# rm -rf，会顺着 bind mount 删到宋主的 /proc —— 必须先确认无残留挂载点再删。
+# rm -rf，会顺着 bind mount 删到宿主的 /proc —— 必须先确认无残留挂载点再删。
 cleanup_rootfs() {
   local d
   for d in dev sys proc; do
@@ -101,7 +101,7 @@ mkdir -p "$ROOTFS_DIR/boot/extlinux"
 
 log "③b chroot 内 apk 安装用户态必装包：$WIFI_PKGS"
 # 为何要 chroot：wifi-scripts/iw 都有 post-install 脚本（建符号链、注册 hotplug），
-# 手工解 .apk 会漏掉脚本和 apk DB 记录。宋主是 x86_64，靠 qemu-user + binfmt
+# 手工解 .apk 会漏掉脚本和 apk DB 记录。宿主是 x86_64，靠 qemu-user + binfmt
 # 跑 aarch64（CI 里 apt 装 qemu-user-static；本地容器/devcontainer 已具备）。
 # 放在 overlay（④）之前：若包自带同名配置，以我们的 overlay 为准。
 SUDO=""; [ "$(id -u)" = 0 ] || SUDO="sudo"
@@ -115,11 +115,48 @@ done
 mkdir -p "$ROOTFS_DIR/tmp"
 $SUDO cp /etc/resolv.conf "$ROOTFS_DIR/tmp/resolv.conf"
 # 真功能检查：chroot 里能不能跑 aarch64 二进制。
-# ⚠ 别用 `[ -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]` 判断——binfmt_misc 是宋主全局
+# ⚠ 别用 `[ -e /proc/sys/fs/binfmt_misc/qemu-aarch64 ]` 判断——binfmt_misc 是宿主全局
 # 机制，容器里即使看不到注册文件（--privileged 下 /proc/sys/fs/binfmt_misc 可能没挂
 # 进来）执行照样能成功；反之文件在也可能解释器缺失。实测过这个假阴性。
-$SUDO chroot "$ROOTFS_DIR" /bin/uname -m >/dev/null 2>&1 \
-  || die "chroot 里跑不了 aarch64（qemu-user/binfmt 未就绪）——装 qemu-user-static 并确认 binfmt 已注册"
+# CI 上反过来也有坑：apt 装了 qemu-user-static 但 systemd-binfmt 没重启 → 注册未生效。
+# 所以这里按代价从小到大依次尝试，全部幂等；均失败则打出诊断再 die。
+ensure_aarch64_chroot() {
+  $SUDO chroot "$ROOTFS_DIR" /bin/uname -m >/dev/null 2>&1 && return 0
+  warn "chroot 里跑不了 aarch64，尝试启用 binfmt…"
+  $SUDO mount binfmt_misc -t binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
+  $SUDO systemctl restart systemd-binfmt 2>/dev/null || true
+  $SUDO update-binfmts --enable qemu-aarch64 2>/dev/null || true
+  $SUDO update-binfmts --enable qemu-aarch64-static 2>/dev/null || true
+  # 手工注册（内核支持 \xNN 转义；F = 注册时就打开解释器，容器内也能用）
+  local Q
+  for Q in /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64; do
+    [ -x "$Q" ] || continue
+    printf ':qemu-aarch64:M::\\x7fELF\\x02\\x01\\x01\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x02\\x00\\xb7\\x00:\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\x00\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xff\\xfe\\xff\\xff\\xff:%s:F\n' "$Q" \
+      | $SUDO tee /proc/sys/fs/binfmt_misc/register >/dev/null 2>&1 || true
+  done
+  $SUDO chroot "$ROOTFS_DIR" /bin/uname -m >/dev/null 2>&1 && return 0
+  # 最后手段：docker 预装多架构 binfmt（GH runner 有 docker；无 docker 则跳过）
+  if command -v docker >/dev/null 2>&1; then
+    warn "改用 multiarch/qemu-user-static 注册 binfmt"
+    docker run --rm --privileged multiarch/qemu-user-static --reset -p yes >/dev/null 2>&1 || true
+  fi
+  $SUDO chroot "$ROOTFS_DIR" /bin/uname -m >/dev/null 2>&1 && return 0
+  # 均失败 → 把现场打出来，别让人对着空日志猜
+  {
+    echo "--- binfmt/chroot 诊断 ---"
+    echo "host arch : $(uname -m)"
+    echo "binfmt_misc 挂载: $(grep -c binfmt_misc /proc/mounts 2>/dev/null || echo 0) 处"
+    echo "binfmt 条目: $(ls /proc/sys/fs/binfmt_misc/ 2>&1 | tr '\n' ' ')"
+    for Q in /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64; do
+      [ -x "$Q" ] && echo "解释器 : $Q 存在" || echo "解释器 : $Q 缺失"
+    done
+    echo "chroot 实际报错："
+    $SUDO chroot "$ROOTFS_DIR" /bin/uname -m 2>&1 | head -3
+  } >&2
+  return 1
+}
+ensure_aarch64_chroot \
+  || die "chroot 里跑不了 aarch64（上方有诊断）——需 qemu-user + binfmt_misc 就绪"
 # 部分 feed（amlogic/video）在本 target 不存在，apk 会刷 WARNING 但不影响安装
 $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add $WIFI_PKGS \
   || die "chroot apk add 失败（查 qemu-user-static/binfmt 是否可用、网络是否通）"
