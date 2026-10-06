@@ -93,6 +93,10 @@ jobs:
       - name: 25 fetch kernel-actions custom kernel (vmlinuz + modules + dtb)
         env:
           KERNEL_ACTIONS_TAG: ${{ inputs.kernel_tag || 'latest' }}
+          # 必须传：匠名 GitHub API 限额 60 次/小时/**IP**，而托管 runner 共享 Azure
+          # 出口 IP，别人把额度用光你就 403（run #19 实测）。带 token 后是
+          # 5000 次/小时/token，且读公共仓的 release 用本仓 token 就够。
+          GITHUB_TOKEN: ${{ github.token }}
         run: bash scripts/25-fetch-kernel.sh
 
       - name: 30 fetch ImmortalWrt armsr rootfs
