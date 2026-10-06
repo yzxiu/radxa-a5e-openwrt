@@ -10,6 +10,21 @@
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.." && source scripts/00-lib.sh
+
+# ⚠ 本步必须以 root 跑，否则会在最后一步静默失败：
+#   1) ⑥ 的 tar 读不了 apk 装出来的 root 属主文件。CI 实测（run #15/#16/#18）：
+#        tar: ./lib/apk/db/lock: Cannot open: Permission denied
+#        tar: Exiting with failure status due to previous errors
+#      同时 EXIT trap 里的 rm -rf 也删不掉 root 属主文件（刷一屏 Permission denied）。
+#   2) 非 root 解包会把整个 rootfs 属主压成 runner 的 uid，丢掉 tarball 里原本的
+#      root / 服务用户属主（以 root 解包才能保留）。
+#   3) ③b 本来就要 chroot + bind mount proc/sys/dev。
+# 本地在容器里通常是 root，不会触发；宿主上跑则需免密 sudo。
+if [ "$(id -u)" != 0 ]; then
+  command -v sudo >/dev/null || die "需要 root（或 sudo）：chroot 装包 + tar 保留属主"
+  echo "==> 非 root，用 sudo 重新执行本步（原因见脚本开头注释）"
+  exec sudo -E bash "$WORK/scripts/40-assemble-rootfs.sh" "$@"
+fi
 [ -f "$OWRT/$OWRT_TAR" ] || die "缺 openwrt rootfs，先跑 30-fetch-openwrt.sh"
 
 # ---- 依据 KSRC 定位内核各部件 ----
@@ -173,6 +188,15 @@ echo "   ✓ /sbin/wifi + /usr/sbin/iw + mac80211.sh 就位"
 
 log "④ 应用整文件定制 custom/rootfs/*（overlay 覆盖）"
 cp -a "$CUSTOM/." "$ROOTFS_DIR/" 2>/dev/null || true
+# cp -a 会把 overlay 源目录的**宋主属主**一并带进镜像（git checkout 在 CI 里属
+# runner uid，实测板上 /etc/config/wireless 变成了 1000:1000）。这些都是我们自己的
+# 配置/脚本，应当 root:root。只改 overlay 确实提供的那些文件（-h 不跟随符号链），
+# 不去 chown -R 整个 rootfs ——那会把 OpenWrt 里故意的服务用户属主一并抹平。
+if [ -d "$CUSTOM" ]; then
+  ( cd "$CUSTOM" && find . \( -type f -o -type l \) -print ) | while IFS= read -r f; do
+    chown -h 0:0 "$ROOTFS_DIR/${f#./}" 2>/dev/null || true
+  done
+fi
 
 log "⑤ 应用局部补丁 patches/*.sh（按序，每个带 why 注释）"
 for p in "$PATCHES"/*.sh; do
@@ -194,9 +218,13 @@ else
 fi
 
 log "⑥ 打包 rootfs.tar（保留符号链接/xattr）"
-# 输出可能是历史 root 属主的同名文件；owrt/ 当前用户可写 → 先 unlink 再写
+# 本步以 root 跑（见开头注释），产物属主会是 root:root。而后续步骤（stage /
+# 50 打包 / upload-artifact）仍以原用户身份跑，所以显式 chmod 0644 保证可读：
+# sudo 的 umask 是可配的（默认 0022 没事，但若 sudoers 里设了 umask=0077
+# 就会落成 600，下游 cp 直接 Permission denied）。
 OUTTAR="$OWRT/openwrt-a5e-rootfs.tar"
 rm -f "$OUTTAR" 2>/dev/null || true
 tar -C "$ROOTFS_DIR" -cf "$OUTTAR" .
+chmod 0644 "$OUTTAR"
 echo "   → $OWRT/openwrt-a5e-rootfs.tar ($(du -h "$OWRT/openwrt-a5e-rootfs.tar"|cut -f1))"
 echo "完成。下一步：./scripts/50-build-image.sh（复用 out/build-image）"
