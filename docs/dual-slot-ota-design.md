@@ -64,53 +64,50 @@ SPL@LBA256 → U-Boot → distro_boot 扫描 bootable 分区(p2→p3) → p3 内
 
 ## 4. 目标设计
 
-### 4.1 分区布局（双槽）
+> **2026-10-07 定稿修正**（参考 ophub `openwrt-tf`/`openwrt-install-allwinner` 后）：
+> - **不改造 build-image 出双槽镜像**。刷机仍是单槽（现有流水线零改动），
+>   **首次启动**由 `/etc/uci-defaults/99-a5e-init-dualslot` 在线改造：剩余空间切成
+>   槽 B（dd 副本）+ shared（仅建分区）。uci-defaults 成功自删、失败下启重跑，天然幂等调度。
+> - **kernel 不挪出 rootfs**（各槽完整自含 /boot），extlinux 每槽一份、root= 写死自指 UUID。
+>   原"kernel 挪 p2 共享 + `${rootfs_uuid}` 变量展开"方案作废——多了一个待实测风险点且无收益。
+> - **切换杠杆 = `distro_bootpart` env**（strings 已实证），OTA 时 `fw_setenv distro_bootpart 3|4`；
+>   兜底用 sgdisk bootable 属性翻转（改 GPT，不依赖 env 可用性）。
+
+### 4.1 分区布局（首启改造后）
 
 ```
-p1   16M    FAT   label=config   ← U-Boot env (uboot.env)，不动
-p2   128M   FAT   label=boot     ← extlinux.conf + vmlinuz + initrd + dtb（两槽共享 kernel）
-p3   ~1.2G  ext4  label=rootfs-a ← 纯 rootfs（槽 A）
-p4   ~1.2G  ext4  label=rootfs-b ← 纯 rootfs（槽 B，首刷空槽由首次 OTA 写入）
+p1   16M    FAT   config        ← U-Boot env (uboot.env)，不动
+p2   300M   FAT   efi           ← 空置，不动
+p3   ~670M  ext4  rootfs        ← 槽 A（当前运行系统）
+p4   =p3    ext4  rootfs-b      ← 槽 B（dd 副本，extlinux 自指，立即可回滚）
+p5   rest   ext4  shared-data   ← 共享数据（本期只建分区+挂载点，不做 docker 迁移）
 ```
 
-要点：
-- **kernel/dtb/initrd 移出 rootfs 进 p2**（这是与现状最大的结构差异）。共享 kernel 是自洽选择：extlinux 只能从 p2 读一份 kernel，两槽必须用同一份。
-- 两槽 rootfs 不再含 kernel，体积更小；16G eMMC 下两槽共 ~2.4G 无压力。
-- p2 容量 128M：kernel(27M)+initrd(~50M)+dtb 足够，且 initrd 可精简。
-
-### 4.2 启动链
+### 4.2 首启初始化流程（uci-defaults 脚本）
 
 ```
-SPL@LBA256 → U-Boot → distro_boot
-  → scan_dev_for_boot_part: 无 distro_bootpart env → 枚举 bootable
-  → p2 (bootable) 命中 extlinux/extlinux.conf
-  → 展开 append root=UUID=${rootfs_uuid} console=ttyAS0,... mac_addr=${mac} ...
-  → 从 p2 读 /vmlinuz + /initrd.img + /dtb/  → 挂载 root=UUID=${rootfs_uuid}（p3 或 p4）
+[0] 幂等: p4=rootfs-b 且内部有 .dualslot-ready 标记 → 退出
+    (只查 label 不够: dd 中断会留半成品, 必须凭标记区分)
+[1] 定位盘: /proc/cmdline root=UUID → blkid -U → /dev/mmcblk0p3 → DISK
+[2] 空间检查: p4(=p3大) + 对齐余量, 不足则 die(uci-defaults 失败会下启重试)
+[3] sgdisk 建 p4(与 p3 等大, 1MiB 对齐) / p5(剩余全部, -34 GPT 备份)
+[4] mkfs.ext4 -U <指定UUID> -L rootfs-b / shared-data
+    (-U 指定 UUID 而非随机, 便于写 extlinux; 仿 openwrt-tf)
+[5] dd p3→p4 (在线; sync 先行, 复制后 e2fsck 重放 journal 修复一致性)
+[6] sed p4 的 /boot/extlinux/extlinux.conf: root=UUID=<p4 uuid> (自指)
+[7] sgdisk -A 4:set:2 bootable (与 build-image part-set-bootable 等效)
+[8] 写 .dualslot-ready 标记 (幂等依据)
+[9] fstab 加 /mnt/shared 挂载点 (只建入口)
 ```
 
-env 默认（首次启动由 uci-defaults 或升级脚本初始化）：
-```
-rootfs_uuid=<槽A UUID>     ← 活动槽 rootfs 的 UUID
-slot=a
-```
-
-### 4.3 OTA 流程（`upgrade-a5e.sh`，仿 upgrade-lubancat.sh）
+### 4.3 启动与切换
 
 ```
-[1] 查 release（GitHub API，直连优先→sing-box mixed 127.0.0.1:1087 回退）
-    定位资产 owrt-a5e.img.tar.gz
-[2] 下载 → /tmp/upload/
-[3] 判当前槽：fw_printenv slot / 或解析 /proc/cmdline 的 root UUID
-[4] 准备对侧槽：mkfs.ext4 -L rootfs-<对侧>
-    （镜像布局可能是单槽 p3：losetup -f -P 挂 img → mount 其 rootfs 分区只读）
-[5] 复制系统树：新镜像 rootfs → 对侧槽（tar 管道，排除 p2 已有的 boot 内核件）
-[6] 配置迁移：旧系统按 BACKUP_LIST 打包 → 解到对侧槽
-    （默认清单照抄 openwrt-backup 的 60+ 项，A5E 场景裁剪：
-     /etc/config/ /etc/shadow /etc/ssh/ /etc/docker/daemon.json /etc/rc.local
-     /etc/sysctl.d/ /etc/modprobe.d/ 等；支持 /etc/a5e_backup_list.conf 自定义）
-[7] fw_setenv rootfs_uuid <对侧槽 UUID> ; fw_setenv slot <对侧>
-[8] reboot → 新槽启动
-[9] 验证点：新系统首启后 health check（网络/fw4），失败则手动 fw_setenv 切回（回滚）
+启动: U-Boot distro_boot → 枚举 bootable 分区(p2无extlinux→p3命中) → 槽 A
+OTA 切槽(后续 upgrade-a5e.sh 实现):
+  首选: fw_setenv distro_bootpart 4   (扫描固定到 p4 → p4 extlinux 自指 → 槽 B)
+  兜底: sgdisk -A 3:clr:2 + -A 4:set:2 (bootable 列表只剩 p4)
+回滚: 反向操作, 或删除 distro_bootpart env 恢复默认扫描(仍落 p3)
 ```
 
 ### 4.4 配置迁移清单（BACKUP_LIST，初版）
