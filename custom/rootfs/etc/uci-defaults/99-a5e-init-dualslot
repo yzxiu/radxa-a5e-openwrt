@@ -18,7 +18,7 @@
 #
 # 切换杠杆 (OTA 时用, 本脚本只初始化):
 #   首选 fw_setenv distro_bootpart 2|3   (需 fw_env.config 实测配置)
-#   兜底 sgdisk bootable 属性翻转        (直接改 GPT, 不依赖 env)
+#   兜底 parted boot flag 翻转          (直接改 GPT, 不依赖 env)
 #=============================================================================
 
 STEPS="[\033[95m STEPS \033[0m]"
@@ -74,12 +74,17 @@ fi
 [ "${READY}" = "1" ] && { ok "槽 B 已初始化(含 ready 标记)，跳过"; exit 0; }
 
 # ---------- 3. 解析槽 A 分区几何（槽 B 与之等大） ----------
-sgdisk -p "${DISK}" >/dev/null 2>&1 || die "sgdisk 读分区表失败（${DISK}）"
-A_FIRST="$(sgdisk -i 2 "${DISK}" 2>/dev/null | awk '/First sector/{print $3}')"
-A_LAST="$(sgdisk -i 2 "${DISK}" 2>/dev/null | awk '/Last sector/{print $3}')"
-DISK_LAST="$(sgdisk -p "${DISK}" 2>/dev/null | awk '/last usable sector/{print $NF}')"
-[ -n "${A_FIRST}" ] && [ -n "${A_LAST}" ] && [ -n "${DISK_LAST}" ] \
-    || die "解析分区几何失败: A=[$A_FIRST..$A_LAST] disk_last=${DISK_LAST}"
+command -v parted >/dev/null 2>&1 || die "缺 parted（构建期 40 步应已 apk add）"
+# parted -m 机器可读输出：
+#   BYT;\n/dev/mmcblk0:<总扇区>s:...:gpt:...:;\n<num>:<start>s:<end>s:<size>s:<fs>:<name>:<flags>;
+PRT="$(parted -m -s "${DISK}" unit s print 2>/dev/null)" || die "parted 读分区表失败（${DISK}）"
+DISK_SECTORS="$(echo "${PRT}" | sed -n '2p' | awk -F: '{gsub(/s$/,"",$2); print $2}')"
+A_FIRST="$(echo "${PRT}" | awk -F: '$1==2{gsub(/s$/,"",$2); print $2}')"
+A_LAST="$(echo "${PRT}"   | awk -F: '$1==2{gsub(/s$/,"",$3); print $3}')"
+# GPT 末尾备份头占 33 扇区，可用到最后一个扇区 -34（与 build-image 的 -34 对齐）
+DISK_LAST=$((DISK_SECTORS - 34))
+[ -n "${A_FIRST}" ] && [ -n "${A_LAST}" ] && [ -n "${DISK_SECTORS}" ] \
+    || die "解析分区几何失败: A=[$A_FIRST..$A_LAST] disk_sectors=${DISK_SECTORS}"
 
 A_SIZE=$((A_LAST - A_FIRST + 1))
 # 槽 B 起点: 槽 A 结束后 1MiB(2048 扇区)对齐
@@ -104,10 +109,16 @@ log "shared 将建 [${S_FIRST}..${S_LAST}] (剩余全部)"
 EXT4_GUID="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
 
 echo -e "${STEPS} 创建分区 p3(rootfs-b) / p4(shared-data)"
-sgdisk -n3:"${B_FIRST}":"${B_LAST}" -t3:"${EXT4_GUID}" -c3:rootfs-b "${DISK}" \
-    || die "sgdisk 建 p3 失败"
-sgdisk -n4:"${S_FIRST}":"${S_LAST}" -t4:"${EXT4_GUID}" -c4:shared-data "${DISK}" \
-    || die "sgdisk 建 p4 失败"
+echo -e "${STEPS} 创建分区 p3(rootfs-b) / p4(shared-data)"
+# parted 建 GPT 分区: mkpart <part-type(忽略)> <fs-type> <start> <end>, end 为最后一个扇区(含)
+parted -s "${DISK}" unit s mkpart primary ext4 "${B_FIRST}s" "${B_LAST}s" \
+    || die "parted 建 p3 失败"
+parted -s "${DISK}" name 3 rootfs-b \
+    || die "parted 命名 p3 失败"
+parted -s "${DISK}" unit s mkpart primary ext4 "${S_FIRST}s" "${S_LAST}s" \
+    || die "parted 建 p4 失败"
+parted -s "${DISK}" name 4 shared-data \
+    || die "parted 命名 p4 失败"
 
 # 通知内核重读分区表 (BLKPG 增量添加, 不动在用的 p2; 各工具谁有谁用)
 sync
@@ -160,7 +171,9 @@ umount "${MNT_B}" 2>/dev/null || umount -f "${MNT_B}"
 # ---------- 8. p3 设 bootable (U-Boot distro_boot 扫描依据) ----------
 # 与刷机包 build-image 的 part-set-bootable 等效 (GPT attribute 2, legacy boot)。
 # build-image 用 part-set-bootable true + attributes 4 双写, 这里同款。
-sgdisk -A 3:set:2 "${DISK}" || warn "设 p3 bootable 属性失败"
+# parted 的 boot flag 在 GPT 上映射 legacy_boot attribute（与 build-image 的
+# part-set-bootable 等效）。⚠ 待板上 parted -m print 核对 flags 列出现 legacy_boot。
+parted -s "${DISK}" set 3 boot on || warn "设 p3 bootable 属性失败"
 sync
 
 # ---------- 9. shared-data 挂载点 (只建入口, 不做 docker 迁移) ----------
