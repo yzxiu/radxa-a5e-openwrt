@@ -195,6 +195,12 @@ done
 # 部分 feed（amlogic/video）在本 target 不存在，apk 会刷 WARNING 但不影响安装
 $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add "$WIFI_WPAD_PKG" $WIFI_PKGS \
   || die "chroot apk add 失败（查 qemu-user-static/binfmt 是否可用、网络是否通）"
+# 首启双槽初始化(99-a5e-init-dualslot)依赖 sgdisk 操作 GPT；ImmortalWrt 基础系统
+# 不带任何分区工具（lubancat 固件自带 parted 的等价物），构建期一并装上。
+$SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add gptfdisk \
+  || die "chroot apk add gptfdisk 失败（首启双槽初始化依赖 sgdisk）"
+[ -x "$ROOTFS_DIR/usr/sbin/sgdisk" ] || die "gptfdisk 装上但缺 /usr/sbin/sgdisk"
+echo "   ✓ sgdisk 就位（首启双槽初始化用）"
 for d in dev sys proc; do
   $SUDO umount "$ROOTFS_DIR/$d" 2>/dev/null || $SUDO umount -l "$ROOTFS_DIR/$d" 2>/dev/null || true
 done
