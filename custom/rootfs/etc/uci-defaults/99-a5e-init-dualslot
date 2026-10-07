@@ -1,24 +1,22 @@
 #!/bin/bash
 #=============================================================================
-# A5E 双槽初始化 —— 首次启动时把单槽刷机包在线改造为双槽 + shared
+# A5E 双槽初始化 —— 首次启动时把剩余空间切成 槽B(=槽A等大) + shared(rest)
 #
-# 参考 lubancat 做法（ophub openwrt-tf 模式）：
-#   刷机包只有槽 A（p2 rootfs 960M）；本脚本首启时在剩余空间在线建
-#   槽 B（p3，与槽 A 等大，dd 副本立即可回滚）+ shared（p4，剩余全部）。
-#   升级时由 upgrade-a5e.sh 写对侧槽 + fw_setenv distro_bootpart 切换。
+# 刷机包布局（custom/build-image，对齐 lubancat1）：
+#   p1  16M   config  FAT   ← U-Boot env 相关
+#   p2  128M  boot    FAT   ← extlinux.conf + vmlinuz + initrd + dtb（唯一一份）
+#   p3  960M  rootfs  ext4  ← 槽 A（当前运行系统，纯系统无 kernel）
 #
-# 触发: /etc/uci-defaults/ 首启自动执行一次(成功自删,失败下启重跑)
-# 幂等: p3 label=rootfs-b 且内部 .dualslot-ready 标记, 双重判定
+# 本脚本首启建立（仿 lubancat openwrt-tf）：
+#   p4  =p3大 rootfs-b  ext4  ← 槽 B（dd 副本，立即可回滚）
+#   p5  rest  shared-data ext4 ← 共享数据（本期只建分区+挂载，不做 docker 迁移）
 #
-# 布局(改造后):
-#   p1  16M    FAT   config        ← U-Boot env (uboot.env), 刷机自带
-#   p2  960M   ext4  rootfs        ← 槽 A (当前运行系统, 刷机自带)
-#   p3  960M   ext4  rootfs-b      ← 槽 B (本脚本建, dd 副本, extlinux 自指)
-#   p4  rest   ext4  shared-data   ← shared (本脚本建, 只建分区, 不做 docker 迁移)
+# 切槽机制（OTA 时用, 本脚本只初始化）：
+#   extlinux.conf 唯一一份在 p2 FAT；切槽 = 改它的 root=UUID 指向槽A/槽B
+#   （等价 lubancat1 改 armbianEnv.txt rootdev；不依赖 U-Boot env 可用性）
 #
-# 切换杠杆 (OTA 时用, 本脚本只初始化):
-#   首选 fw_setenv distro_bootpart 2|3   (需 fw_env.config 实测配置)
-#   兜底 parted boot flag 翻转          (直接改 GPT, 不依赖 env)
+# 触发: /etc/uci-defaults/ 首启自动执行一次(成功自删,失败/空间不足下启重试)
+# 幂等: p4 label=rootfs-b 且内部 .dualslot-ready → 跳过
 #=============================================================================
 
 STEPS="[\033[95m STEPS \033[0m]"
@@ -35,14 +33,12 @@ die()  { echo -e "${ERROR} $*"; exit 1; }
 echo -e "${STEPS} A5E 双槽初始化开始"
 
 # ---------- 1. 定位引导盘 ----------
-# root=UUID=<uuid> (build-image 注入的 cmdline) → blkid 反查设备
 ROOT_UUID="$(sed -n 's/.*root=UUID=\([^ ]*\).*/\1/p' /proc/cmdline)"
 [ -n "${ROOT_UUID}" ] || die "cmdline 里没有 root=UUID=，无法定位根分区"
 
 ROOT_DEV="$(blkid -U "${ROOT_UUID}" 2>/dev/null)"
 [ -n "${ROOT_DEV}" ] || die "blkid 找不到 UUID=${ROOT_UUID} 对应的设备"
 
-# /dev/mmcblk0p2 → DISK=/dev/mmcblk0 PT_PRE=/dev/mmcblk0p
 case "${ROOT_DEV}" in
     /dev/mmcblk*p[0-9]*) DISK="$(echo "${ROOT_DEV}" | sed -E 's/p[0-9]+$//')" ;;
     /dev/sd[a-z][0-9]*)  DISK="$(echo "${ROOT_DEV}" | sed -E 's/[0-9]+$//')" ;;
@@ -50,86 +46,91 @@ case "${ROOT_DEV}" in
 esac
 PT_PRE="${DISK}p"
 
-# 槽 A 必须是 p2（刷机包布局）；其他形态说明不是本仓库镜像
+# 布局自检：根应在 p3（槽A）；p2 是 boot(FAT)
 case "${ROOT_DEV}" in
-    *p2) : ;;
-    *) warn "根分区是 ${ROOT_DEV}（非 p2），可能是旧单槽(eMMC p3)或手工布局，仍按剩余空间追加槽 B" ;;
+    *p3) : ;;
+    *) warn "根分区是 ${ROOT_DEV}（非 p3），可能是旧布局或手工调整，按剩余空间追加槽 B" ;;
 esac
-
 log "槽 A: ${ROOT_DEV} (UUID=${ROOT_UUID})"
 log "目标盘: ${DISK}"
 
 # ---------- 2. 幂等检查 ----------
-# p3 已是 rootfs-b 且内部有 .dualslot-ready 标记 → 完整初始化过, 退出。
-# 只查 label 不够: dd 中断会留下半成品 p3, 必须凭标记区分。
+# p4 已是 rootfs-b 且内部有 .dualslot-ready → 完整初始化过。
+# 只查 label 不够: dd 中断会留半成品, 必须凭标记区分。
 READY=0
-if blkid "${PT_PRE}3" 2>/dev/null | grep -q 'LABEL="rootfs-b"'; then
+if blkid "${PT_PRE}4" 2>/dev/null | grep -q 'LABEL="rootfs-b"'; then
     MNT_CHK=/mnt/.dualslot-chk
     mkdir -p "${MNT_CHK}"
-    if mount -o ro "${PT_PRE}3" "${MNT_CHK}" 2>/dev/null; then
+    if mount -o ro "${PT_PRE}4" "${MNT_CHK}" 2>/dev/null; then
         [ -f "${MNT_CHK}/.dualslot-ready" ] && READY=1
         umount "${MNT_CHK}" 2>/dev/null
     fi
 fi
 [ "${READY}" = "1" ] && { ok "槽 B 已初始化(含 ready 标记)，跳过"; exit 0; }
 
-# ---------- 3. 解析槽 A 分区几何（槽 B 与之等大） ----------
-command -v parted >/dev/null 2>&1 || die "缺 parted（构建期 40 步应已 apk add）"
+# ---------- 3. 解析分区几何 ----------
+command -v parted >/dev/null 2>&1 \
+    || die "缺 parted（构建期 40 步应已 apk add）"
 # parted -m 机器可读输出：
-#   BYT;\n/dev/mmcblk0:<总扇区>s:...:gpt:...:;\n<num>:<start>s:<end>s:<size>s:<fs>:<name>:<flags>;
+#   BYT;\n/dev/mmcblkX:<总扇区>s:...:gpt:...:;\n<num>:<start>s:<end>s:<size>s:<fs>:<name>:<flags>;
 PRT="$(parted -m -s "${DISK}" unit s print 2>/dev/null)" || die "parted 读分区表失败（${DISK}）"
 DISK_SECTORS="$(echo "${PRT}" | sed -n '2p' | awk -F: '{gsub(/s$/,"",$2); print $2}')"
-A_FIRST="$(echo "${PRT}" | awk -F: '$1==2{gsub(/s$/,"",$2); print $2}')"
-A_LAST="$(echo "${PRT}"   | awk -F: '$1==2{gsub(/s$/,"",$3); print $3}')"
-# GPT 末尾备份头占 33 扇区，可用到最后一个扇区 -34（与 build-image 的 -34 对齐）
+A_FIRST="$(echo "${PRT}" | awk -F: '$1==3{gsub(/s$/,"",$2); print $2}')"
+A_LAST="$(echo "${PRT}"   | awk -F: '$1==3{gsub(/s$/,"",$3); print $3}')"
+# GPT 末尾备份头占 33 扇区，可用到最后一个扇区 -34（与 build-image 对齐）
 DISK_LAST=$((DISK_SECTORS - 34))
 [ -n "${A_FIRST}" ] && [ -n "${A_LAST}" ] && [ -n "${DISK_SECTORS}" ] \
     || die "解析分区几何失败: A=[$A_FIRST..$A_LAST] disk_sectors=${DISK_SECTORS}"
 
+# ---------- 3b. 槽 A 被扩到盘尾的检测 ----------
+# 刷机后若 rootfs 被（用户/工具）扩到盘尾（end == 最后可用扇区），没有剩余空间
+# 建槽 B。ext4 根分区在线无法收缩（缩小需 umount），uci-defaults 阶段也 umount
+# 不了自己 → 明确报错指引，不静默跳过。
+if [ "${A_LAST}" -ge "${DISK_LAST}" ]; then
+    die "槽 A(rootfs) 已占满整盘（end=${A_LAST} == 盘尾 ${DISK_LAST}），无空间建槽 B。
+  处理：用 parted 从救援环境/另一系统把 ${PT_PRE}3 缩回 960M（resize2fs 先缩），
+  或重新 dd 刷机后不要扩 rootfs。本次跳过，修复后重启本脚本会自动继续。"
+fi
+
 A_SIZE=$((A_LAST - A_FIRST + 1))
-# 槽 B 起点: 槽 A 结束后 1MiB(2048 扇区)对齐
+# 槽B 起点: 槽A 结束后 1MiB(2048 扇区)对齐; 槽B 与槽A 等大
 B_FIRST=$(( (A_LAST + 1 + 2047) / 2048 * 2048 ))
 B_LAST=$((B_FIRST + A_SIZE - 1))
-# shared: 槽 B 结束 → 盘末尾 -34 (GPT 备份)
+# shared: 槽B 结束 → 盘末尾
 S_FIRST=$(( (B_LAST + 1 + 2047) / 2048 * 2048 ))
 S_LAST="${DISK_LAST}"
 
+# 空间检查: 槽B(=A_SIZE) + shared 至少 1MiB
 [ "${DISK_LAST}" -ge "$((B_FIRST + A_SIZE + 2048))" ] || {
     FREE_MIB=$(( (DISK_LAST - A_LAST) * 512 / 1048576 ))
     NEED_MIB=$(( A_SIZE * 512 / 1048576 ))
     die "剩余空间不足: 空闲 ${FREE_MIB}MiB, 槽B需 ${NEED_MIB}MiB。跳过双槽改造。"
 }
-[ "${S_LAST}" -gt "${S_FIRST}" ] || S_LAST=$((S_FIRST))  # 极端小盘保底
-
 log "槽 A [${A_FIRST}..${A_LAST}] size=${A_SIZE} sectors ($((A_SIZE*512/1048576))MiB)"
 log "槽 B 将建 [${B_FIRST}..${B_LAST}] (与槽 A 等大)"
 log "shared 将建 [${S_FIRST}..${S_LAST}] (剩余全部)"
 
-# ---------- 4. 建 p3(槽B) / p4(shared) ----------
-EXT4_GUID="0FC63DAF-8483-4772-8E79-3D69D8477DE4"
-
-echo -e "${STEPS} 创建分区 p3(rootfs-b) / p4(shared-data)"
-echo -e "${STEPS} 创建分区 p3(rootfs-b) / p4(shared-data)"
+# ---------- 4. 建 p4 / p5 ----------
+echo -e "${STEPS} 创建分区 p4(rootfs-b) / p5(shared-data)"
 # parted 建 GPT 分区: mkpart <part-type(忽略)> <fs-type> <start> <end>, end 为最后一个扇区(含)
 parted -s "${DISK}" unit s mkpart primary ext4 "${B_FIRST}s" "${B_LAST}s" \
-    || die "parted 建 p3 失败"
-parted -s "${DISK}" name 3 rootfs-b \
-    || die "parted 命名 p3 失败"
-parted -s "${DISK}" unit s mkpart primary ext4 "${S_FIRST}s" "${S_LAST}s" \
     || die "parted 建 p4 失败"
-parted -s "${DISK}" name 4 shared-data \
+parted -s "${DISK}" name 4 rootfs-b \
     || die "parted 命名 p4 失败"
+parted -s "${DISK}" unit s mkpart primary ext4 "${S_FIRST}s" "${S_LAST}s" \
+    || die "parted 建 p5 失败"
+parted -s "${DISK}" name 5 shared-data \
+    || die "parted 命名 p5 失败"
 
-# 通知内核重读分区表 (BLKPG 增量添加, 不动在用的 p2; parted 包自带 partprobe 优先)
+# 通知内核重读分区表 (BLKPG 增量添加, 不动在用的 p3; parted 包自带 partprobe 优先)
 sync
 partprobe "${DISK}" 2>/dev/null \
     || blockdev --rereadpt "${DISK}" 2>/dev/null \
-    || partx -u "${DISK}" 2>/dev/null \
     || echo 1 > "/sys/class/block/$(basename ${DISK})/device/rescan" 2>/dev/null \
     || true
 sleep 2
-[ -b "${PT_PRE}3" ] && [ -b "${PT_PRE}4" ] \
-    || die "新分区节点未出现（${PT_PRE}3/4）。重启后会自动重试本脚本。"
+[ -b "${PT_PRE}4" ] && [ -b "${PT_PRE}5" ] \
+    || die "新分区节点未出现（${PT_PRE}4/5）。重启后会自动重试本脚本。"
 
 # ---------- 5. 生成 UUID + 格式化 ----------
 UUID_B="$(cat /proc/sys/kernel/random/uuid)"
@@ -137,47 +138,30 @@ UUID_S="$(cat /proc/sys/kernel/random/uuid)"
 log "UUID_B=${UUID_B}"
 log "UUID_S=${UUID_S}"
 
-echo -e "${STEPS} 格式化 p3 / p4"
-mkfs.ext4 -q -F -U "${UUID_B}" -L rootfs-b -E lazy_journal_init=0,lazy_table_init=0 "${PT_PRE}3" \
-    || die "mkfs.ext4 p3 失败"
-mkfs.ext4 -q -F -U "${UUID_S}" -L shared-data -E lazy_journal_init=0,lazy_table_init=0 "${PT_PRE}4" \
+echo -e "${STEPS} 格式化 p4 / p5"
+mkfs.ext4 -q -F -U "${UUID_B}" -L rootfs-b -E lazy_journal_init=0,lazy_table_init=0 "${PT_PRE}4" \
     || die "mkfs.ext4 p4 失败"
+mkfs.ext4 -q -F -U "${UUID_S}" -L shared-data -E lazy_journal_init=0,lazy_table_init=0 "${PT_PRE}5" \
+    || die "mkfs.ext4 p5 失败"
 
-# ---------- 6. dd 复制 p2 → p3 (槽 B 初始副本) ----------
-# 在线复制运行中的根: 复制前 sync 落盘, 复制后 e2fsck 重放 journal 修复一致性。
-# 首启阶段用户业务未开始, 写流量极小; 槽 B 之后会被 OTA 整树覆盖, 初始一致性足够。
-echo -e "${STEPS} dd 复制 ${PT_PRE}2 → ${PT_PRE}3 (在线, 请稍候)"
+# ---------- 6. dd 复制 p3 → p4 (槽 B 初始副本) ----------
+# 两槽分区等大, 位级复制。在线复制运行中的根: sync 先行, 复制后 e2fsck 重放
+# journal 修复一致性。首启阶段写流量极小, 且槽 B 之后会被 OTA 整树覆盖。
+echo -e "${STEPS} dd 复制 ${PT_PRE}3 → ${PT_PRE}4 (在线, 请稍候)"
 sync
-dd if="${PT_PRE}2" of="${PT_PRE}3" bs=4M conv=fsync \
+dd if="${PT_PRE}3" of="${PT_PRE}4" bs=4M conv=fsync \
     || die "dd 复制失败"
-e2fsck -f -y "${PT_PRE}3" >/dev/null 2>&1 || warn "e2fsck p3 有修正(在线复制正常现象)"
-resize2fs "${PT_PRE}3" >/dev/null 2>&1 || warn "resize2fs p3 失败(不影响启动)"
+e2fsck -f -y "${PT_PRE}4" >/dev/null 2>&1 || warn "e2fsck p4 有修正(在线复制正常现象)"
 
-# ---------- 7. p3 的 extlinux.conf 改自指 UUID + ready 标记 ----------
+# ---------- 7. 写 ready 标记 (幂等依据) ----------
 MNT_B=/mnt/.dualslot-b
 mkdir -p "${MNT_B}"
-mount -o rw "${PT_PRE}3" "${MNT_B}" || die "挂载 p3 失败"
-if [ -f "${MNT_B}/boot/extlinux/extlinux.conf" ]; then
-    sed -i "s/root=UUID=[^ ]*/root=UUID=${UUID_B}/" "${MNT_B}/boot/extlinux/extlinux.conf"
-    grep -q "root=UUID=${UUID_B}" "${MNT_B}/boot/extlinux/extlinux.conf" \
-        && log "p3 extlinux.conf 已自指 root=UUID=${UUID_B}" \
-        || warn "p3 extlinux.conf 替换 root=UUID 未命中, 请人工核对"
-else
-    warn "p3 没有 boot/extlinux/extlinux.conf (非本仓库镜像?)"
-fi
+mount -o rw "${PT_PRE}4" "${MNT_B}" || die "挂载 p4 失败"
 echo "slot=b uuid=${UUID_B} created=$(date -u +%FT%TZ)" > "${MNT_B}/.dualslot-ready"
-log "已写 .dualslot-ready 标记"
 umount "${MNT_B}" 2>/dev/null || umount -f "${MNT_B}"
+log "已写 .dualslot-ready 标记"
 
-# ---------- 8. p3 设 bootable (U-Boot distro_boot 扫描依据) ----------
-# 与刷机包 build-image 的 part-set-bootable 等效 (GPT attribute 2, legacy boot)。
-# build-image 用 part-set-bootable true + attributes 4 双写, 这里同款。
-# parted 的 boot flag 在 GPT 上映射 legacy_boot attribute（与 build-image 的
-# part-set-bootable 等效）。⚠ 待板上 parted -m print 核对 flags 列出现 legacy_boot。
-parted -s "${DISK}" set 3 boot on || warn "设 p3 bootable 属性失败"
-sync
-
-# ---------- 9. shared-data 挂载点 (只建入口, 不做 docker 迁移) ----------
+# ---------- 8. shared 挂载点 (只建入口, 不做 docker 迁移) ----------
 grep -qE "shared-data|mnt/shared" /etc/config/fstab 2>/dev/null || {
     uci -q add fstab mount >/dev/null 2>&1 && {
         uci -q set fstab.@mount[-1].target='/mnt/shared'
@@ -189,7 +173,8 @@ grep -qE "shared-data|mnt/shared" /etc/config/fstab 2>/dev/null || {
     } || warn "uci fstab 配置失败(可开机后手动挂)"
 }
 
-# ---------- 10. 完成 ----------
+# ---------- 9. 完成 ----------
+# 注意：不切启动槽。extlinux.conf 在 p2（FAT），root=UUID 仍指槽 A；
+# OTA 时改 p2 的 extlinux.conf root=UUID 即切槽（等价 lubancat1 armbianEnv）。
 touch /etc/.dualslot-initialized
-ok "双槽初始化完成: 槽A=${ROOT_DEV}(运行中) 槽B=${PT_PRE}3(rootfs-b, 可回滚) shared=${PT_PRE}4"
-echo -e "${INFO} 当前仍从槽 A 启动; OTA 升级将写入对侧槽并切换。"
+ok "双槽初始化完成: 槽A=${ROOT_DEV}(运行中) 槽B=${PT_PRE}4(rootfs-b, 可回滚) shared=${PT_PRE}5"

@@ -33,7 +33,11 @@ echo "   build-image 引用的 rootfs 名：$RN"
 
 pack_inplace() {   # 环境里有 guestfish，直接打
   local B; B=$(mktemp -d); trap 'rm -rf "$B"' RETURN
-  cp "$BI" "$B/build-image"; chmod +x "$B/build-image"; ln -sf "$RT" "$B/$RN"
+  cp "$BI" "$B/build-image"; chmod +x "$B/build-image"
+  ln -sf "$RT" "$B/$RN"
+  # lubancat1 布局：boot-files/（vmlinuz+initrd+dtb+extlinux）由 40 步产出，拷进工作目录
+  [ -d "$OWRT/boot-files" ] || die "缺 $OWRT/boot-files（boot 件），先 ./build.sh 40"
+  cp -r "$OWRT/boot-files" "$B/boot-files"
   ( cd "$B" && guestfish -f ./build-image ) || die "guestfish 就地打包失败"
   mv -f "$B/output_512.img" "$IMG"
 }
@@ -45,6 +49,8 @@ pack_container() { # 借 rsdk 容器打包
   docker exec "$RSDK_CONTAINER" bash -lc "rm -rf $W && mkdir -p $W"
   docker cp "$RT" "$RSDK_CONTAINER:$W/$RN"
   docker cp "$BI" "$RSDK_CONTAINER:$W/build-image"
+  [ -d "$OWRT/boot-files" ] || die "缺 $OWRT/boot-files（boot 件），先 ./build.sh 40"
+  docker cp "$OWRT/boot-files" "$RSDK_CONTAINER:$W/boot-files"
   log "容器内 direnv(nix) 激活 + guestfish 打包（~20s）"
   docker exec "$RSDK_CONTAINER" bash -lc "
     cd /workspaces/rsdk && direnv allow >/dev/null 2>&1 || true
