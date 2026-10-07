@@ -10,9 +10,14 @@
 # ============================================================================
 set -euo pipefail
 cd "$(dirname "$0")/.." && source scripts/00-lib.sh
-RT="$OWRT/openwrt-a5e-rootfs.tar"; BI="$OUT/build-image"
+RT="$OWRT/openwrt-a5e-rootfs.tar"
+# build-image 优先用仓库定制版（单槽 960M 布局，去 efi）；无则回退 radxa 下载版
+BI="$WORK/custom/build-image"
+if [ ! -f "$BI" ]; then
+  BI="$OUT/build-image"
+fi
 [ -f "$RT" ] || die "缺 $RT，先 ./build.sh 40"
-[ -f "$BI" ] || die "缺 $BI，先 ./build.sh 15(下载) 或 10(rsdk)"
+[ -f "$BI" ] || die "缺 $BI（仓库 custom/build-image 与下载版都不存在）"
 
 # build-image 里 tar-in 引用的 rootfs 文件名因来源而异：
 #   本地 rsdk 自建版 = rootfs.tar；radxa release 下载版 = <DEB_BASE>.rootfs.tar。

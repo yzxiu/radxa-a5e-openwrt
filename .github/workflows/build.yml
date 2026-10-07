@@ -204,7 +204,7 @@ jobs:
           IMG="../owrt-a5e.img"
           [ -f "$IMG" ] || { echo "✗ 没产出 img"; exit 1; }
           ls -lh "$IMG"; cat "../owrt-a5e.img.sha256"
-          S=$(partx -g -o START --nr 3 "$IMG"); N=$(partx -g -o SECTORS --nr 3 "$IMG")
+          S=$(partx -g -o START --nr 2 "$IMG"); N=$(partx -g -o SECTORS --nr 2 "$IMG")
           dd if="$IMG" of=/tmp/v.img bs=512 skip="$S" count="$N" status=none
           debugfs -R "stat /usr/lib/linux-image-*/allwinner/sun55i-a527-cubie-a5e.dtb" /tmp/v.img 2>/dev/null | grep -E "Inode|Size" && echo "✓ dtb 落地"
           rm -f /tmp/v.img
