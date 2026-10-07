@@ -27,6 +27,10 @@ on:
         description: 'kernel-actions release (latest 或具体 v*)'
         required: false
         default: 'latest'
+      rootfs_tag:
+        description: 'router release (latest 或具体 ImmortalWrt-*)'
+        required: false
+        default: 'latest'
   push:
     branches: ['**']          # 任意分支都触发；release 另受 main 限制（见 release job 的 if）
     paths:
@@ -100,6 +104,8 @@ jobs:
         run: bash scripts/25-fetch-kernel.sh
 
       - name: 30 fetch ImmortalWrt armsr rootfs
+        env:
+          OWRT_TAG: ${{ inputs.rootfs_tag || 'latest' }}
         run: bash scripts/30-fetch-openwrt.sh
 
       - name: 40 assemble OpenWrt rootfs.tar

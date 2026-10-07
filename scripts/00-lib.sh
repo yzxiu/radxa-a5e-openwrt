@@ -15,14 +15,14 @@ UBOOT_DIR=radxa-cubie-a5e             # u-boot 资产目录名（setup.sh + u-bo
 # + A5E 官方内核拼装。rootfs 来自 yzxiu/router 的网络编译 ImmortalWrt。
 # 用 radxa-a5e 命名的包：当前内容与 armsr/armv8 通用包等同（仅 smartdns web
 # 构建哈希不同），但后续 release 会针对 A5E 做差异化（预装包/配置等），
-# 故锁定这个名字。版本变更时同步更新 OWRT_TAG / OWRT_SHA。
+# 故锁定这个名字。
+# OWRT_TAG=latest（默认）跟随 router 最新 release；30 步运行时从 GitHub API
+# 解析实际 tag + asset digest(sha256) 并校验+打印。要精确复现某次构建：
+#   OWRT_TAG=ImmortalWrt-25.12.2-20261005-1909 ./build.sh 30
 OWRT_VER=25.12.2
-OWRT_TAG=ImmortalWrt-25.12.2-20261005-1909
+OWRT_TAG=${OWRT_TAG:-latest}
 OWRT_REPO=yzxiu/router
 OWRT_TAR=radxa-a5e-rootfs.tar.gz
-# 下载后校验；版本变更时更新
-OWRT_SHA=2c84c4b300156a4b375a2ac1fb08ecbc35d386bcba5dd7138f5ba6465a8b4781
-OWRT_URL="https://github.com/${OWRT_REPO}/releases/download/${OWRT_TAG}/${OWRT_TAR}"
 
 # ---- 路径（相对仓库外层工作区根 radxa-a5e/）----
 WORK=${WORK:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}   # = openwrt-a5e-build/
