@@ -58,10 +58,10 @@ log "目标盘: ${DISK}"
 # p4 已是 rootfs-b 且内部有 .dualslot-ready → 完整初始化过。
 # 只查 label 不够: dd 中断会留半成品, 必须凭标记区分。
 READY=0
-if blkid "${PT_PRE}4" 2>/dev/null | grep -q 'LABEL="rootfs-b"'; then
+if blkid "${PT_PRE}3" 2>/dev/null | grep -q 'LABEL="rootfs-b"'; then
     MNT_CHK=/mnt/.dualslot-chk
     mkdir -p "${MNT_CHK}"
-    if mount -o ro "${PT_PRE}4" "${MNT_CHK}" 2>/dev/null; then
+    if mount -o ro "${PT_PRE}3" "${MNT_CHK}" 2>/dev/null; then
         [ -f "${MNT_CHK}/.dualslot-ready" ] && READY=1
         umount "${MNT_CHK}" 2>/dev/null
     fi
@@ -88,7 +88,7 @@ DISK_LAST=$((DISK_SECTORS - 34))
 # 不了自己 → 明确报错指引，不静默跳过。
 if [ "${A_LAST}" -ge "${DISK_LAST}" ]; then
     die "槽 A(rootfs) 已占满整盘（end=${A_LAST} == 盘尾 ${DISK_LAST}），无空间建槽 B。
-  处理：用 parted 从救援环境/另一系统把 ${PT_PRE}3 缩回 960M（resize2fs 先缩），
+  处理：用 parted 从救援环境/另一系统把 ${PT_PRE}2 缩回 960M（resize2fs 先缩），
   或重新 dd 刷机后不要扩 rootfs。本次跳过，修复后重启本脚本会自动继续。"
 fi
 
@@ -129,8 +129,8 @@ partprobe "${DISK}" 2>/dev/null \
     || echo 1 > "/sys/class/block/$(basename ${DISK})/device/rescan" 2>/dev/null \
     || true
 sleep 2
-[ -b "${PT_PRE}4" ] && [ -b "${PT_PRE}5" ] \
-    || die "新分区节点未出现（${PT_PRE}4/5）。重启后会自动重试本脚本。"
+[ -b "${PT_PRE}3" ] && [ -b "${PT_PRE}4" ] \
+    || die "新分区节点未出现（${PT_PRE}3/4）。重启后会自动重试本脚本。"
 
 # ---------- 5. 生成 UUID + 格式化 ----------
 UUID_B="$(cat /proc/sys/kernel/random/uuid)"
@@ -138,25 +138,25 @@ UUID_S="$(cat /proc/sys/kernel/random/uuid)"
 log "UUID_B=${UUID_B}"
 log "UUID_S=${UUID_S}"
 
-echo -e "${STEPS} 格式化 p4 / p5"
-mkfs.ext4 -q -F -U "${UUID_B}" -L rootfs-b -E lazy_journal_init=0,lazy_table_init=0 "${PT_PRE}4" \
+echo -e "${STEPS} 格式化 p3 / p4"
+mkfs.ext4 -q -F -U "${UUID_B}" -L rootfs-b -E lazy_journal_init=0,lazy_table_init=0 "${PT_PRE}3" \
+    || die "mkfs.ext4 p3 失败"
+mkfs.ext4 -q -F -U "${UUID_S}" -L shared-data -E lazy_journal_init=0,lazy_table_init=0 "${PT_PRE}4" \
     || die "mkfs.ext4 p4 失败"
-mkfs.ext4 -q -F -U "${UUID_S}" -L shared-data -E lazy_journal_init=0,lazy_table_init=0 "${PT_PRE}5" \
-    || die "mkfs.ext4 p5 失败"
 
-# ---------- 6. dd 复制 p3 → p4 (槽 B 初始副本) ----------
+# ---------- 6. dd 复制 p2 → p3 (槽 B 初始副本) ----------
 # 两槽分区等大, 位级复制。在线复制运行中的根: sync 先行, 复制后 e2fsck 重放
 # journal 修复一致性。首启阶段写流量极小, 且槽 B 之后会被 OTA 整树覆盖。
-echo -e "${STEPS} dd 复制 ${PT_PRE}3 → ${PT_PRE}4 (在线, 请稍候)"
+echo -e "${STEPS} dd 复制 ${PT_PRE}2 → ${PT_PRE}3 (在线, 请稍候)"
 sync
-dd if="${PT_PRE}3" of="${PT_PRE}4" bs=4M conv=fsync \
+dd if="${PT_PRE}2" of="${PT_PRE}3" bs=4M conv=fsync \
     || die "dd 复制失败"
-e2fsck -f -y "${PT_PRE}4" >/dev/null 2>&1 || warn "e2fsck p4 有修正(在线复制正常现象)"
+e2fsck -f -y "${PT_PRE}3" >/dev/null 2>&1 || warn "e2fsck p3 有修正(在线复制正常现象)"
 
 # ---------- 7. 写 ready 标记 (幂等依据) ----------
 MNT_B=/mnt/.dualslot-b
 mkdir -p "${MNT_B}"
-mount -o rw "${PT_PRE}4" "${MNT_B}" || die "挂载 p4 失败"
+mount -o rw "${PT_PRE}3" "${MNT_B}" || die "挂载 p3 失败"
 echo "slot=b uuid=${UUID_B} created=$(date -u +%FT%TZ)" > "${MNT_B}/.dualslot-ready"
 umount "${MNT_B}" 2>/dev/null || umount -f "${MNT_B}"
 log "已写 .dualslot-ready 标记"
@@ -177,4 +177,4 @@ grep -qE "shared-data|mnt/shared" /etc/config/fstab 2>/dev/null || {
 # 注意：不切启动槽。extlinux.conf 在 p2（FAT），root=UUID 仍指槽 A；
 # OTA 时改 p2 的 extlinux.conf root=UUID 即切槽（等价 lubancat1 armbianEnv）。
 touch /etc/.dualslot-initialized
-ok "双槽初始化完成: 槽A=${ROOT_DEV}(运行中) 槽B=${PT_PRE}4(rootfs-b, 可回滚) shared=${PT_PRE}5"
+ok "双槽初始化完成: 槽A=${ROOT_DEV}(运行中) 槽B=${PT_PRE}3(rootfs-b, 可回滚) shared=${PT_PRE}4"

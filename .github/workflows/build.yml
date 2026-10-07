@@ -216,25 +216,25 @@ jobs:
           IMG="../owrt-a5e.img"
           [ -f "$IMG" ] || { echo "✗ 没产出 img"; exit 1; }
           ls -lh "$IMG"; cat "../owrt-a5e.img.sha256"
-          # lubancat1 布局: p1 16M config / p2 128M boot(FAT) / p3 960M rootfs
+          # lubancat1 布局: p1 128M boot(FAT) / p2 960M rootfs 槽A
           partx -s "$IMG" | tee /dev/stderr | awk '
             NR>1 { n[$1]=$5; }
             END {
-              if (n[1] != "16M")  { print "✗ p1 应 16M, 实 " n[1];  exit 1 }
-              if (n[2] != "128M") { print "✗ p2(boot) 应 128M, 实 " n[2]; exit 1 }
-              if (n[3] != "960M") { print "✗ p3(rootfs) 应 960M, 实 " n[3]; exit 1 }
-              print "✓ 分区表 p1/p2/p3 = 16M/128M/960M（lubancat1 布局）"
+              if (n[1] != "128M") { print "✗ p1(boot) 应 128M, 实 " n[1]; exit 1 }
+              if (n[2] != "960M") { print "✗ p2(rootfs) 应 960M, 实 " n[2]; exit 1 }
+              
+              print "✓ 分区表 p1/p2 = 128M boot + 960M rootfs（lubancat1 布局）"
             }'
           # p2 FAT 里的启动件（mtools 免挂载读取）
-          B2=$(( $(partx -g -o START --nr 2 "$IMG") * 512 ))
-          mdir  -i "$IMG@$B2" ::/boot/dtb/ | grep -q "sun55i-a527-cubie-a5e.dtb" && echo "✓ dtb 在 p2 /boot/dtb/"
-          mtype -i "$IMG@$B2" ::/boot/extlinux/extlinux.conf | grep -q "root=UUID=" && echo "✓ extlinux root=UUID 已注入"
+          B1=$(( $(partx -g -o START --nr 1 "$IMG") * 512 ))
+          mdir  -i "$IMG@$B1" ::/boot/dtb/ | grep -q "sun55i-a527-cubie-a5e.dtb" && echo "✓ dtb 在 p2 /boot/dtb/"
+          mtype -i "$IMG@$B1" ::/boot/extlinux/extlinux.conf | grep -q "root=UUID=" && echo "✓ extlinux root=UUID 已注入"
           # p3 ext4 的 rootfs UUID 与 extlinux 指向一致
-          S=$(partx -g -o START --nr 3 "$IMG"); N=$(partx -g -o SECTORS --nr 3 "$IMG")
+          S=$(partx -g -o START --nr 2 "$IMG"); N=$(partx -g -o SECTORS --nr 2 "$IMG")
           dd if="$IMG" of=/tmp/v.img bs=512 skip="$S" count="$N" status=none
           U3=$(debugfs -R "cat /etc/fstab" /tmp/v.img 2>/dev/null | awk '$2=="/"{print $1}')
-          U2=$(mtype -i "$IMG@$B2" ::/boot/extlinux/extlinux.conf | grep -oE "root=UUID=[^ ]*")
-          [ "${U3#UUID=}" = "${U2#root=UUID=}" ] && echo "✓ extlinux root= 与 p3 fstab UUID 一致（$U3）" \
+          U2=$(mtype -i "$IMG@$B1" ::/boot/extlinux/extlinux.conf | grep -oE "root=UUID=[^ ]*")
+          [ "${U3#UUID=}" = "${U2#root=UUID=}" ] && echo "✓ extlinux root= 与 p2 fstab UUID 一致（$U3）" \
             || { echo "✗ UUID 不一致: extlinux=$U2 fstab=$U3"; exit 1; }
           rm -f /tmp/v.img
 

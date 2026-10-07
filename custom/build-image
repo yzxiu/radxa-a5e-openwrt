@@ -2,19 +2,19 @@
 # ============================================================================
 # A5E 双槽刷机包 build-image —— 布局对齐 lubancat1（ophub）
 # ----------------------------------------------------------------------------
-#   p1  32768..65535      16M   config  FAT   ← radxa 原有
-#   p2  65536..327679     128M  boot    FAT   ← extlinux + vmlinuz + initrd + dtb
-#                                               U-Boot env 期望 0:2 为 FAT，放这里；
-#                                               FAT 无 ext4 日志，U-Boot 读取稳定
-#   p3  327680..2293759   960M  rootfs  ext4  ← 槽 A 纯系统（kernel 已分离到 p2）
+#   p1  32768..294911     128M  boot    FAT   ← extlinux + vmlinuz + initrd + dtb
+#                                                （lubancat1 的 BOOT 分区；radxa 原
+#                                                 config 分区已并入，不再单列）
+#   p2  294912..2258943   960M  rootfs  ext4  ← 槽 A 纯系统（kernel 已分离到 p1）
 #
-# 槽 B(p4, 960M) 与 shared(p5, rest) 由首启 uci-defaults 在线建立。
-# img 截断到 p3 末尾（~1.3G raw）。
+# 槽 B(p3, 960M) 与 shared(p4, rest) 由首启 uci-defaults 在线建立
+# （等价 lubancat1 openwrt-tf 建 ROOTFS2/SHARED）。最终 4 分区，编号对齐。
+# img 截断到 p2 末尾（~1.2G raw）。
 #
 # 输入（50 步按 build-image 引用名软链到工作目录）：
 #   rootfs.tar   ← 纯系统 rootfs（40 步产出，不含 kernel/dtb）
 #   boot-files/  ← 40 步产出: vmlinuz + initrd.img + dtb/sun55i-a527-cubie-a5e.dtb
-#                  + extlinux.conf（root= 占位，本脚本注入 p3 UUID）
+#                  + extlinux.conf（root= 占位，本脚本注入 p2 UUID）
 # ============================================================================
 
 !echo "Image generation started at $(date)."
@@ -26,26 +26,22 @@ run
 
 echo "Creating partition table..."
 part-init /dev/sda gpt
-part-add /dev/sda primary 32768 65535
-part-add /dev/sda primary 65536 327679
-part-set-bootable /dev/sda 2 true
-part-add /dev/sda primary 327680 2293759
-part-set-gpt-type /dev/sda 2 C12A7328-F81F-11D2-BA4B-00A0C93EC93B
-part-set-gpt-type /dev/sda 3 0FC63DAF-8483-4772-8E79-3D69D8477DE4
-part-set-gpt-attributes /dev/sda 2 4
+part-add /dev/sda primary 32768 294911
+part-set-bootable /dev/sda 1 true
+part-add /dev/sda primary 294912 2258943
+part-set-gpt-type /dev/sda 1 C12A7328-F81F-11D2-BA4B-00A0C93EC93B
+part-set-gpt-type /dev/sda 2 0FC63DAF-8483-4772-8E79-3D69D8477DE4
+part-set-gpt-attributes /dev/sda 1 4
 
 echo "Formatting partitions..."
-mkfs vfat /dev/sda1 label:config
-mkfs vfat /dev/sda2 label:boot
-mkfs ext4 /dev/sda3 label:rootfs
+mkfs vfat /dev/sda1 label:boot
+mkfs ext4 /dev/sda2 label:rootfs
 
 echo "Mounting partitions..."
-mount /dev/sda3 /
-mkdir-p /config
+mount /dev/sda2 /
 mkdir-p /boot
 mkdir-p /boot/extlinux
-mount /dev/sda1 /config
-mount /dev/sda2 /boot
+mount /dev/sda1 /boot
 
 echo "Deploying rootfs..."
 tar-in rootfs.tar / xattrs:true
@@ -62,10 +58,9 @@ copy-out /etc/kernel/cmdline "./temp_dir"
 copy-out /usr/lib/u-boot/ "./temp_dir"
 
 echo "Updating files with disk info..."
-blkid /dev/sda1 | grep "^UUID:" | cut -d " " -f 2 | xargs printf "UUID=%s /config vfat defaults,x-systemd.automount,fmask=0077,dmask=0077 0 2\n" > "./temp_dir/fstab"
-blkid /dev/sda2 | grep "^UUID:" | cut -d " " -f 2 | xargs printf "UUID=%s /boot vfat defaults,x-systemd.automount,fmask=0077,dmask=0077 0 2\n" >> "./temp_dir/fstab"
-blkid /dev/sda3 | grep "^UUID:" | cut -d " " -f 2 | xargs printf "UUID=%s / ext4 defaults 0 1\n" >> "./temp_dir/fstab"
-blkid /dev/sda3 | grep "^UUID:" | cut -d " " -f 2 > "./temp_dir/rootfs_uuid"
+blkid /dev/sda1 | grep "^UUID:" | cut -d " " -f 2 | xargs printf "UUID=%s /boot vfat defaults,x-systemd.automount,fmask=0077,dmask=0077 0 2\n" > "./temp_dir/fstab"
+blkid /dev/sda2 | grep "^UUID:" | cut -d " " -f 2 | xargs printf "UUID=%s / ext4 defaults 0 1\n" >> "./temp_dir/fstab"
+blkid /dev/sda2 | grep "^UUID:" | cut -d " " -f 2 > "./temp_dir/rootfs_uuid"
 !sed -i -E -e "s/([[:space:]]*root=[^[:space:]]*[[:space:]]*)/ /g" -e "s/(append[[:space:]]+)/append root=UUID=$(cat "./temp_dir/rootfs_uuid") /g" "./boot-files/extlinux.conf"
 !sed -i -E -e "s/([[:space:]]*root=[^[:space:]]*[[:space:]]*)/ /g" -e "s/^/root=UUID=$(cat "./temp_dir/rootfs_uuid") /g" "./temp_dir/cmdline"
 copy-in ./temp_dir/fstab /etc/
@@ -76,7 +71,7 @@ echo "Truncating image to rootfs end..."
 unmount-all
 sync
 shutdown
-!truncate "--size=$(( ( $(sgdisk -i 3 "output_512.img" | grep "Last sector:" | cut -d " " -f 3) + 34 ) * 512 ))" "output_512.img"
+!truncate "--size=$(( ( $(sgdisk -i 2 "output_512.img" | grep "Last sector:" | cut -d " " -f 3) + 34 ) * 512 ))" "output_512.img"
 
 echo "Fixing partition table..."
 !sgdisk -ge "output_512.img" > /dev/null 2>&1 || true
