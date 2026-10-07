@@ -195,15 +195,17 @@ done
 # 部分 feed（amlogic/video）在本 target 不存在，apk 会刷 WARNING 但不影响安装
 $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add "$WIFI_WPAD_PKG" $WIFI_PKGS \
   || die "chroot apk add 失败（查 qemu-user-static/binfmt 是否可用、网络是否通）"
-# 首启双槽初始化(99-a5e-init-dualslot)需要分区工具操作 GPT。ImmortalWrt 25.12.2
-# 的 aarch64_generic feed 里 gptfdisk 只有 Makefile 没编出二进制(实测 404)，
-# parted-3.6-r2 确认存在；且 ophub openwrt-tf 参考实现本就用的 parted → 用它。
-$SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add parted \
-  || die "chroot apk add parted 失败（首启双槽初始化依赖 parted）"
-command -v "$ROOTFS_DIR/usr/sbin/parted" >/dev/null 2>&1 \
-  || [ -x "$ROOTFS_DIR/usr/sbin/parted" ] || die "parted 装上但缺 /usr/sbin/parted"
-[ -x "$ROOTFS_DIR/usr/sbin/partprobe" ] || warn "partprobe 不在(内核重读用备用路径)"
-echo "   ✓ parted 就位（首启双槽初始化用）"
+# 首启双槽初始化(99-a5e-init-dualslot)需要 parted 操作 GPT。router remake 的
+# A5E rootfs 已预装 parted（参考 lubancat 集成，在 /sbin/parted 而非 /usr/sbin）——
+# 已预装则跳过；未预装（换了 rootfs 来源）才 apk add 兜底。
+if [ -x "$ROOTFS_DIR/sbin/parted" ]; then
+  echo "   ✓ parted 已预装于 rootfs（/sbin/parted，router remake 集成）"
+else
+  $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add parted \
+    || die "chroot apk add parted 失败（首启双槽初始化依赖 parted）"
+  [ -x "$ROOTFS_DIR/sbin/parted" ] || die "parted 装上但缺 /sbin/parted"
+  echo "   ✓ parted 安装完成（/sbin/parted）"
+fi
 for d in dev sys proc; do
   $SUDO umount "$ROOTFS_DIR/$d" 2>/dev/null || $SUDO umount -l "$ROOTFS_DIR/$d" 2>/dev/null || true
 done

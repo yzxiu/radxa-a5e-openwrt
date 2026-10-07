@@ -120,9 +120,10 @@ parted -s "${DISK}" unit s mkpart primary ext4 "${S_FIRST}s" "${S_LAST}s" \
 parted -s "${DISK}" name 4 shared-data \
     || die "parted 命名 p4 失败"
 
-# 通知内核重读分区表 (BLKPG 增量添加, 不动在用的 p2; 各工具谁有谁用)
+# 通知内核重读分区表 (BLKPG 增量添加, 不动在用的 p2; parted 包自带 partprobe 优先)
 sync
-blockdev --rereadpt "${DISK}" 2>/dev/null \
+partprobe "${DISK}" 2>/dev/null \
+    || blockdev --rereadpt "${DISK}" 2>/dev/null \
     || partx -u "${DISK}" 2>/dev/null \
     || echo 1 > "/sys/class/block/$(basename ${DISK})/device/rescan" 2>/dev/null \
     || true
