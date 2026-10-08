@@ -258,6 +258,18 @@ jobs:
           retention-days: 30
           if-no-files-found: error
 
+      # 单独的压缩包 artifact：owrt-a5e-img artifact 是 zip 打包(1.1G)，
+      # 只想拿 128M tar.gz 时直接下这个，免下载解压全量 zip。
+      - name: upload compressed image (tar.gz 单独入口)
+        uses: actions/upload-artifact@v4
+        with:
+          name: owrt-a5e-img-tar-gz
+          path: |
+            dist/owrt-a5e.img.tar.gz
+            dist/owrt-a5e.img.sha256
+          retention-days: 30
+          if-no-files-found: error
+
   # build 成功即发 Release：每次成功构建 → 一条正式 release
   # （tag = rel-<UTC 日期时分秒>-r<run号>，唯一不覆盖、不依赖 v* tag 触发）
   release:
