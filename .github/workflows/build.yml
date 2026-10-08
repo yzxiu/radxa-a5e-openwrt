@@ -65,7 +65,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             curl ca-certificates xz-utils cpio rsync python3 tar coreutils \
-            e2fsprogs util-linux parted mtools file \
+            e2fsprogs util-linux parted mtools file kmod \
             qemu-user-static binfmt-support
           # 40 步要 chroot 进 aarch64 rootfs 跑 apk（wifi-scripts/iw 的 post-install
           # 必须在目标环境里执行），靠 qemu-user + binfmt_misc 做用户态模拟。

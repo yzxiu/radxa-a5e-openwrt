@@ -88,6 +88,15 @@ else
 fi
 echo "   dtb → boot-files/dtb/$DTB（rootfs 不再含 /usr/lib/linux-image）"
 
+# modules.dep.bin：OpenWrt 的 modprobe(/sbin/kmodloader→libkmod) 只认 .bin 索引，
+# 而 kernel-actions 打包的 modules 目录只有文本 modules.dep → 板上 modprobe 任何
+# 模块都 255（vfat 等 =m 模块加载不了, /boot(FAT) 挂不上）。宿主 kmod 的 depmod
+# 跨架构可读 ELF, -b 指向装配树重建索引。
+depmod -b "$ROOTFS_DIR" "$KVER" 2>/dev/null || warn "depmod -b 失败（宿主缺 kmod?）"
+[ -f "$ROOTFS_DIR/lib/modules/$KVER/modules.dep.bin" ] \
+  && echo "   ✓ modules.dep.bin 已生成（modprobe 可用）" \
+  || die "modules.dep.bin 未生成——板上 modprobe 将不可用（apt install kmod 后重试）"
+
 log "②b 放入 u-boot（build-image 从 /usr/lib/u-boot/ copy-out 后写 SPL@LBA256）"
 mkdir -p "$ROOTFS_DIR/usr/lib/u-boot"
 cp -a "$(dirname "$UBOOT_SRC")/$(basename "$UBOOT_SRC")" "$ROOTFS_DIR/usr/lib/u-boot/"
