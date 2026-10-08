@@ -71,6 +71,12 @@ fi
 # ---------- 3. 解析分区几何 ----------
 command -v parted >/dev/null 2>&1 \
     || die "缺 parted（构建期 40 步应已 apk add）"
+# dd 刷截断镜像后 GPT 备份头不在盘尾 → parted -s 直接报
+# "Unable to satisfy all constraints" 拒绝任何操作。先用交互应答 fix 修复。
+if ! parted -m -s "${DISK}" unit s print >/dev/null 2>&1; then
+    log "修复 GPT 备份头到盘尾（dd 截断镜像的遗留）"
+    printf 'fix\n' | parted ---pretend-input-tty "${DISK}" print >/dev/null 2>&1 || true
+fi
 # parted -m 机器可读输出：
 #   BYT;\n/dev/mmcblkX:<总扇区>s:...:gpt:...:;\n<num>:<start>s:<end>s:<size>s:<fs>:<name>:<flags>;
 PRT="$(parted -m -s "${DISK}" unit s print 2>/dev/null)" || die "parted 读分区表失败（${DISK}）"
@@ -110,19 +116,30 @@ log "槽 A [${A_FIRST}..${A_LAST}] size=${A_SIZE} sectors ($((A_SIZE*512/1048576
 log "槽 B 将建 [${B_FIRST}..${B_LAST}] (与槽 A 等大)"
 log "shared 将建 [${S_FIRST}..${S_LAST}] (剩余全部)"
 
-# ---------- 4. 建 p4 / p5 ----------
-echo -e "${STEPS} 创建分区 p4(rootfs-b) / p5(shared-data)"
+# ---------- 4. 建 p3 / p4 ----------
+# 幂等: 上次中断可能留下半成品分区(建了分区没格式化) → 已存在则跳过创建
+HAS_P3="$(echo "${PRT}" | awk -F: '$1==3{print $1}')"
+HAS_P4="$(echo "${PRT}" | awk -F: '$1==4{print $1}')"
+echo -e "${STEPS} 创建分区 p3(rootfs-b) / p4(shared-data)"
 # parted 建 GPT 分区: mkpart <part-type(忽略)> <fs-type> <start> <end>, end 为最后一个扇区(含)
-parted -s "${DISK}" unit s mkpart primary ext4 "${B_FIRST}s" "${B_LAST}s" \
-    || die "parted 建 p4 失败"
-parted -s "${DISK}" name 4 rootfs-b \
-    || die "parted 命名 p4 失败"
-parted -s "${DISK}" unit s mkpart primary ext4 "${S_FIRST}s" "${S_LAST}s" \
-    || die "parted 建 p5 失败"
-parted -s "${DISK}" name 5 shared-data \
-    || die "parted 命名 p5 失败"
+if [ -z "${HAS_P3}" ]; then
+    parted -s "${DISK}" unit s mkpart primary ext4 "${B_FIRST}s" "${B_LAST}s" \
+        || die "parted 建 p3 失败"
+    parted -s "${DISK}" name 3 rootfs-b \
+        || die "parted 命名 p3 失败"
+else
+    log "p3 已存在（上次中断的半成品），跳过创建"
+fi
+if [ -z "${HAS_P4}" ]; then
+    parted -s "${DISK}" unit s mkpart primary ext4 "${S_FIRST}s" "${S_LAST}s" \
+        || die "parted 建 p4 失败"
+    parted -s "${DISK}" name 4 shared-data \
+        || die "parted 命名 p4 失败"
+else
+    log "p4 已存在（上次中断的半成品），跳过创建"
+fi
 
-# 通知内核重读分区表 (BLKPG 增量添加, 不动在用的 p3; parted 包自带 partprobe 优先)
+# 通知内核重读分区表 (BLKPG 增量添加, 不动在用的 p2; parted 包自带 partprobe 优先)
 sync
 partprobe "${DISK}" 2>/dev/null \
     || blockdev --rereadpt "${DISK}" 2>/dev/null \
@@ -139,9 +156,9 @@ log "UUID_B=${UUID_B}"
 log "UUID_S=${UUID_S}"
 
 echo -e "${STEPS} 格式化 p3 / p4"
-mkfs.ext4 -q -F -U "${UUID_B}" -L rootfs-b -E lazy_journal_init=0,lazy_table_init=0 "${PT_PRE}3" \
+mkfs.ext4 -q -F -U "${UUID_B}" -L rootfs-b -E lazy_journal_init=0,lazy_itable_init=0 "${PT_PRE}3" \
     || die "mkfs.ext4 p3 失败"
-mkfs.ext4 -q -F -U "${UUID_S}" -L shared-data -E lazy_journal_init=0,lazy_table_init=0 "${PT_PRE}4" \
+mkfs.ext4 -q -F -U "${UUID_S}" -L shared-data -E lazy_journal_init=0,lazy_itable_init=0 "${PT_PRE}4" \
     || die "mkfs.ext4 p4 失败"
 
 # ---------- 6. dd 复制 p2 → p3 (槽 B 初始副本) ----------
