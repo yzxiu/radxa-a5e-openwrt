@@ -227,13 +227,13 @@ jobs:
             }'
           # p2 FAT 里的启动件（mtools 免挂载读取）
           B1=$(( $(partx -g -o START --nr 1 "$IMG") * 512 ))
-          mdir  -i "$IMG@@$B1" ::/boot/dtb/ | grep -q "sun55i-a527-cubie-a5e.dtb" && echo "✓ dtb 在 p2 /boot/dtb/"
-          mtype -i "$IMG@@$B1" ::/boot/extlinux/extlinux.conf | grep -q "root=UUID=" && echo "✓ extlinux root=UUID 已注入"
+          mdir  -i "$IMG@@$B1" ::/ && mdir -i "$IMG@@$B1" ::/dtb/ | grep -q "sun55i-a527-cubie-a5e.dtb" && echo "✓ dtb 在 p1 /dtb/（p1 根=挂载点/boot）"
+          mtype -i "$IMG@@$B1" ::/extlinux/extlinux.conf | grep -q "root=UUID=" && echo "✓ extlinux root=UUID 已注入"
           # p3 ext4 的 rootfs UUID 与 extlinux 指向一致
           S=$(partx -g -o START --nr 2 "$IMG"); N=$(partx -g -o SECTORS --nr 2 "$IMG")
           dd if="$IMG" of=/tmp/v.img bs=512 skip="$S" count="$N" status=none
           U3=$(debugfs -R "cat /etc/fstab" /tmp/v.img 2>/dev/null | awk '$2=="/"{print $1}')
-          U2=$(mtype -i "$IMG@@$B1" ::/boot/extlinux/extlinux.conf | grep -oE "root=UUID=[^ ]*")
+          U2=$(mtype -i "$IMG@@$B1" ::/extlinux/extlinux.conf | grep -oE "root=UUID=[^ ]*")
           [ "${U3#UUID=}" = "${U2#root=UUID=}" ] && echo "✓ extlinux root= 与 p2 fstab UUID 一致（$U3）" \
             || { echo "✗ UUID 不一致: extlinux=$U2 fstab=$U3"; exit 1; }
           rm -f /tmp/v.img
