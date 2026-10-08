@@ -169,6 +169,11 @@ sync
 dd if="${PT_PRE}2" of="${PT_PRE}3" bs=4M conv=fsync \
     || die "dd 复制失败"
 e2fsck -f -y "${PT_PRE}3" >/dev/null 2>&1 || warn "e2fsck p3 有修正(在线复制正常现象)"
+# dd 把槽A 的 fs UUID 一并复制 → 两槽 UUID 相同, OTA 按 root=UUID 切槽会失效。
+# 给槽B 换独立 UUID（mkfs 时指定的 UUID_B 已被 dd 覆盖, 此处重设）。
+command -v tune2fs >/dev/null 2>&1 || die "缺 tune2fs（构建期 40 步应已 apk add）"
+tune2fs -U "${UUID_B}" "${PT_PRE}3" || die "tune2fs 改槽B UUID 失败"
+log "槽B fs UUID → ${UUID_B}（与槽A 区分, OTA 按 UUID 切槽）"
 
 # ---------- 7. 写 ready 标记 (幂等依据) ----------
 MNT_B=/mnt/.dualslot-b

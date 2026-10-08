@@ -202,6 +202,18 @@ else
   [ -x "$ROOTFS_DIR/sbin/parted" ] || die "parted 装上但缺 /sbin/parted"
   echo "   ✓ parted 安装完成（/sbin/parted）"
 fi
+# tune2fs：dd 复制槽A→槽B 会把 fs UUID 一并复制（两槽 UUID 相同, OTA 按 UUID
+# 切槽会失效）→ 首启用 tune2fs -U 给槽B 换新 UUID。ImmortalWrt 裁剪版 e2fsprogs
+# 可能不带 tune2fs（板上实测缺）→ 检测优先, 安装兜底。
+if [ -x "$ROOTFS_DIR/usr/sbin/tune2fs" ] || [ -x "$ROOTFS_DIR/sbin/tune2fs" ]; then
+  echo "   ✓ tune2fs 已预装（dd 后给槽B换 UUID 用）"
+else
+  $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add e2fsprogs \
+    || die "chroot apk add e2fsprogs 失败（首启依赖 tune2fs 修正槽B UUID）"
+  { [ -x "$ROOTFS_DIR/usr/sbin/tune2fs" ] || [ -x "$ROOTFS_DIR/sbin/tune2fs" ]; } \
+    || die "e2fsprogs 装上但仍缺 tune2fs"
+  echo "   ✓ tune2fs 安装完成"
+fi
 for d in dev sys proc; do
   $SUDO umount "$ROOTFS_DIR/$d" 2>/dev/null || $SUDO umount -l "$ROOTFS_DIR/$d" 2>/dev/null || true
 done
