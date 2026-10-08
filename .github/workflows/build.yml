@@ -97,6 +97,8 @@ jobs:
       - name: 25 fetch kernel-actions custom kernel (vmlinuz + modules + dtb)
         env:
           KERNEL_ACTIONS_TAG: ${{ inputs.kernel_tag || 'latest' }}
+          # 匿名 API 共享 IP 易撞 rate limit；GITHUB_TOKEN 认证读公开仓 release，5000/h
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # 必须传：匿名 GitHub API 限额 60 次/小时/**IP**，而托管 runner 共享 Azure
           # 出口 IP，别人把额度用光你就 403（run #19 实测）。带 token 后是
           # 5000 次/小时/token，且读公共仓的 release 用本仓 token 就够。
@@ -106,6 +108,7 @@ jobs:
       - name: 30 fetch ImmortalWrt armsr rootfs
         env:
           OWRT_TAG: ${{ inputs.rootfs_tag || 'latest' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/30-fetch-openwrt.sh
 
       - name: 40 assemble OpenWrt rootfs.tar

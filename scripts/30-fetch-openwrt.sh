@@ -13,8 +13,11 @@ cd "$OWRT"
 # ---------- 解析实际 tag + 资产 URL/digest ----------
 # OWRT_TAG=latest → 取 releases 列表 published_at 最新一条（含 prerelease，同 25 步）。
 API="https://api.github.com/repos/${OWRT_REPO}/releases"
+# CI 匿名调用共享 IP 易撞 rate limit；有 GITHUB_TOKEN 时用认证请求(quota 5000\/h)
+AUTH_HDR=()
+[ -n "${GITHUB_TOKEN:-}" ] && AUTH_HDR=(-H "Authorization: Bearer $GITHUB_TOKEN")
 if [ "${OWRT_TAG}" = "latest" ]; then
-  ACTUAL_TAG="$(curl -fsSL "${API}?per_page=100" | python3 -c '
+  ACTUAL_TAG="$(curl -fsSL "${AUTH_HDR[@]}" "${API}?per_page=100" | python3 -c '
 import sys, json
 d=json.load(sys.stdin)
 rel=[r for r in d if not r.get("draft", False)]
@@ -28,7 +31,7 @@ else
 fi
 
 # 从该 release 资产里找 OWRT_TAR，拿下载地址 + GitHub 官方 sha256 digest
-RES="$(curl -fsSL "${API}/tags/${ACTUAL_TAG}" | python3 -c '
+RES="$(curl -fsSL "${AUTH_HDR[@]}" "${API}/tags/${ACTUAL_TAG}" | python3 -c '
 import sys, json
 name=sys.argv[1]
 r=json.load(sys.stdin)

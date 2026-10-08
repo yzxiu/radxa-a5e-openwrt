@@ -48,6 +48,7 @@ ghapi() {  # $1=url  $2=输出文件；403/429/5xx/网络错误按 15s×n 退避
 
 log "解析 release tag（latest → 实际 tag）"
 API="https://api.github.com/repos/$REPO/releases"
+# CI 匿名调用共享 IP 易撞 rate limit；有 GITHUB_TOKEN 时用认证请求(quota 5000\/h)
 if [ "$TAG" = latest ]; then
   # 直接取 releases 列表里 published_at 最新的一条（正式/pre 都算，不含 draft）
   ghapi "$API?per_page=100" "/tmp/ka_rel.$$" \
