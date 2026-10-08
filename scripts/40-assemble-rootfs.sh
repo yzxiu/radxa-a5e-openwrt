@@ -116,6 +116,7 @@ log "③ 写引导配置 extlinux.conf + /etc/kernel/cmdline（root= 用占位�
   printf '\tappend root=UUID=PLACEHOLDER %s\n' "$APPEND_PARAMS"
 } > "$OWRT/boot-files/extlinux.conf"
 # /etc/kernel/cmdline 仍在 rootfs（build-image 注入 UUID 后供用户态工具参考）
+mkdir -p "$ROOTFS_DIR/etc/kernel"
 printf 'root=UUID=PLACEHOLDER %s\n' "$APPEND_PARAMS" > "$ROOTFS_DIR/etc/kernel/cmdline"
 echo "   已写 boot-files/extlinux.conf 与 etc/kernel/cmdline（均含 plymouth.enable=0）"
 
