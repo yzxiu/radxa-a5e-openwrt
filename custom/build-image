@@ -40,8 +40,8 @@ mkfs ext4 /dev/sda2 label:rootfs
 echo "Mounting partitions..."
 mount /dev/sda2 /
 mkdir-p /boot
-mkdir-p /boot/extlinux
 mount /dev/sda1 /boot
+mkdir-p /boot/extlinux
 
 echo "Deploying rootfs..."
 tar-in rootfs.tar / xattrs:true
