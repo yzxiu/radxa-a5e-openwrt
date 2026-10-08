@@ -84,4 +84,5 @@ echo "Cleaning up..."
 !sync
 
 echo "Deploy succeed!"
+!echo "MBR partition table, layout: p1 boot 128M (FAT) + p2 rootfs 960M (ext4), slots p3/p4 by firstboot."
 !echo "Image generation finished at $(date)."
