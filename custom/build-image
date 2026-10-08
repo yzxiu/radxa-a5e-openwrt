@@ -1,6 +1,8 @@
 #!/usr/bin/env -S guestfish -f
 # ============================================================================
-# A5E 双槽刷机包 build-image —— 布局对齐 lubancat1（ophub）
+# A5E 双槽刷机包 build-image —— 布局对齐 lubancat1（ophub，MBR/msdos 分区表）
+# MBR 无 GPT 备份头概念: dd 截断镜像刷到任意容量卡都不会出现
+# "备份头不在盘尾、parted 拒绝操作" 的问题（A5E U-Boot 对 MBR/GPT 均支持）
 # ----------------------------------------------------------------------------
 #   p1  32768..294911     128M  boot    FAT   ← extlinux + vmlinuz + initrd + dtb
 #                                                （lubancat1 的 BOOT 分区；radxa 原
@@ -25,13 +27,11 @@ add-drive "output_512.img" format:raw discard:besteffort blocksize:512
 run
 
 echo "Creating partition table..."
-part-init /dev/sda gpt
+part-init /dev/sda msdos
 part-add /dev/sda primary 32768 294911
 part-set-bootable /dev/sda 1 true
 part-add /dev/sda primary 294912 2260991
-part-set-gpt-type /dev/sda 1 0FC63DAF-8483-4772-8E79-3D69D8477DE4
-part-set-gpt-type /dev/sda 2 0FC63DAF-8483-4772-8E79-3D69D8477DE4
-part-set-gpt-attributes /dev/sda 1 4
+# msdos: 无 gpt-type/attributes；p1 的 boot flag 即 U-Boot distro_boot 扫描依据
 
 echo "Formatting partitions..."
 mkfs vfat /dev/sda1 label:boot
@@ -71,10 +71,8 @@ echo "Truncating image to rootfs end..."
 unmount-all
 sync
 shutdown
-!truncate "--size=$(( ( $(sgdisk -i 2 "output_512.img" | grep "Last sector:" | cut -d " " -f 3) + 34 ) * 512 ))" "output_512.img"
+!truncate "--size=$(( ( $(parted -m -s "output_512.img" unit s print | awk -F: '$1==2{gsub(/s$/,"",$3); print $3}') + 1 ) * 512 ))" "output_512.img"
 
-echo "Fixing partition table..."
-!sgdisk -ge "output_512.img" > /dev/null 2>&1 || true
 
 echo "Installing bootloader..."
 shutdown
