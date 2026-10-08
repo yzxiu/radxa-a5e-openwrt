@@ -208,8 +208,16 @@ fi
 if [ -x "$ROOTFS_DIR/usr/sbin/tune2fs" ] || [ -x "$ROOTFS_DIR/sbin/tune2fs" ]; then
   echo "   ✓ tune2fs 已预装（dd 后给槽B换 UUID 用）"
 else
-  $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add e2fsprogs \
-    || die "chroot apk add tune2fs 失败（首启依赖 tune2fs 修正槽B UUID）"
+  # rootfs 的 apk 数据库可能已有 tune2fs 记录但二进制被 remake 裁剪 →
+  # apk add 认为已满足不装文件 → 先 add, 仍缺则 apk fix 补装缺失文件。
+  if ! $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add tune2fs; then
+    die "chroot apk add tune2fs 失败（首启依赖 tune2fs 修正槽B UUID）"
+  fi
+  if ! { [ -x "$ROOTFS_DIR/usr/sbin/tune2fs" ] || [ -x "$ROOTFS_DIR/sbin/tune2fs" ]; }; then
+    warn "apk add 后仍缺 tune2fs（db 已满足但文件被裁剪）→ apk fix 补装"
+    $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk fix tune2fs \
+      || die "chroot apk fix tune2fs 失败"
+  fi
   { [ -x "$ROOTFS_DIR/usr/sbin/tune2fs" ] || [ -x "$ROOTFS_DIR/sbin/tune2fs" ]; } \
     || die "tune2fs 装上仍缺二进制"
   echo "   ✓ tune2fs 安装完成"
