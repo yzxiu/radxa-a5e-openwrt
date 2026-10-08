@@ -209,9 +209,9 @@ if [ -x "$ROOTFS_DIR/usr/sbin/tune2fs" ] || [ -x "$ROOTFS_DIR/sbin/tune2fs" ]; t
   echo "   ✓ tune2fs 已预装（dd 后给槽B换 UUID 用）"
 else
   $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add e2fsprogs \
-    || die "chroot apk add e2fsprogs 失败（首启依赖 tune2fs 修正槽B UUID）"
+    || die "chroot apk add tune2fs 失败（首启依赖 tune2fs 修正槽B UUID）"
   { [ -x "$ROOTFS_DIR/usr/sbin/tune2fs" ] || [ -x "$ROOTFS_DIR/sbin/tune2fs" ]; } \
-    || die "e2fsprogs 装上但仍缺 tune2fs"
+    || die "tune2fs 装上仍缺二进制"
   echo "   ✓ tune2fs 安装完成"
 fi
 for d in dev sys proc; do
