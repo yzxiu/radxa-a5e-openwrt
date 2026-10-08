@@ -66,12 +66,6 @@ blkid /dev/sda2 | grep "^UUID:" | cut -d " " -f 2 > "./temp_dir/rootfs_uuid"
 copy-in ./temp_dir/fstab /etc/
 copy-in ./boot-files/extlinux.conf /boot/extlinux/
 copy-in "./temp_dir/cmdline" /etc/kernel/
-# 开机自动挂载 p1 → /boot：OpenWrt 自动挂载走 uci /etc/config/fstab + block-mount，
-# 不走 /etc/fstab（busybox mount 不解析 UUID=）。追加 /boot 段，vfat 模块由
-# /etc/modules.d/75-vfat 在 preinit 加载（先于 block-mount）。
-copy-out /etc/config/fstab "./temp_dir"
-!printf 'config mount\n\toption target "/boot"\n\toption uuid "%s"\n\toption enabled "1"\n' "$(blkid /dev/sda1 | grep '^UUID:' | cut -d ' ' -f 2)" >> "./temp_dir/config-fstab"
-copy-in "./temp_dir/config-fstab" /etc/config/fstab
 
 echo "Truncating image to rootfs end..."
 unmount-all

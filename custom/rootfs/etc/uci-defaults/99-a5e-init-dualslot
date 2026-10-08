@@ -176,7 +176,24 @@ echo "slot=b uuid=${UUID_B} created=$(date -u +%FT%TZ)" > "${MNT_B}/.dualslot-re
 umount "${MNT_B}" 2>/dev/null || umount -f "${MNT_B}"
 log "已写 .dualslot-ready 标记"
 
-# ---------- 8. shared 挂载点 (只建入口, 不做 docker 迁移) ----------
+# ---------- 8. /boot 挂载（uci fstab 段 + 立即挂载） ----------
+# /etc/config/fstab 由 10-fstab uci-defaults 生成(序号 10 < 99, 已存在)。
+# uci 段让后续每次启动 block-mount 自动挂；这里也立即挂一次, 首启后
+# /boot(extlinux.conf 切槽杠杆) 即可操作。vfat 已 kernel builtin。
+BOOT_UUID="$(blkid -s UUID -o value "${PT_PRE}1" 2>/dev/null)"
+if [ -n "${BOOT_UUID}" ] && ! grep -q "target.*'/boot'" /etc/config/fstab 2>/dev/null; then
+    uci -q add fstab mount >/dev/null 2>&1 && {
+        uci -q set fstab.@mount[-1].target='/boot'
+        uci -q set fstab.@mount[-1].uuid="${BOOT_UUID}"
+        uci -q set fstab.@mount[-1].enabled='1'
+        uci -q commit fstab
+        log "已写 uci fstab: /boot ← UUID=${BOOT_UUID}"
+    } || warn "uci fstab 配置失败(不影响, 可手动 mount)"
+fi
+mkdir -p /boot
+mount -t vfat "${PT_PRE}1" /boot 2>/dev/null || warn "立即挂载 /boot 失败(重启后 block-mount 会挂)"
+
+# ---------- 8b. shared 挂载点 (只建入口, 不做 docker 迁移) ----------
 grep -qE "shared-data|mnt/shared" /etc/config/fstab 2>/dev/null || {
     uci -q add fstab mount >/dev/null 2>&1 && {
         uci -q set fstab.@mount[-1].target='/mnt/shared'
