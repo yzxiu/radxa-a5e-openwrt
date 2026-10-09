@@ -96,7 +96,7 @@ grep -q " /mnt/shared " /proc/mounts || die "/mnt/shared 未挂载（首启未�
 blkid "${NEW_DEV}" | grep -q 'TYPE="ext4"' || warn "对侧槽不是 ext4（${NEW_DEV}），mkfs 将覆盖"
 
 # ---------- 3. 几何校验（新固件 rootfs 必须装得进对侧槽）----------
-NEW_SECTORS=$(blockdev --getsz "${NEW_DEV}")
+NEW_SECTORS=$(cat "/sys/class/block/$(basename "${NEW_DEV}")/size")   # busybox 无 blockdev, sysfs 取扇区数
 [ "${NEW_SECTORS}" -ge "${IMG_P2_SECTORS}" ] \
     || die "对侧槽 ${NEW_SECTORS} sectors < 新固件 ${IMG_P2_SECTORS}，装不下"
 
