@@ -45,9 +45,7 @@ done
 # ---------- 1. 解固件 + 挂新 img ----------
 echo -e "${STEPS} A5E 双槽升级"
 # 解包目录必须在磁盘上：/tmp 是 tmpfs(≈半内存, 1G 板约 512M)，装不下 1.1G 的 img
-# → 用 shared 分区（p4，27G）。中断残留靠 cleanup 清理。
-mountpoint -q /mnt/shared || mount -t ext4 "${PT_PRE}4" /mnt/shared 2>/dev/null || true
-mountpoint -q /mnt/shared || die "/mnt/shared 未挂载（首启未完成？），无安全解包空间"
+# → 用 shared 分区（p4，27G）。挂载检查在判槽(拿到 PT_PRE)之后；中断残留靠 cleanup。
 WORK=$(mktemp -d /mnt/shared/.ota-tmp.XXXXXX)
 cleanup() {
     umount -f "${WORK}"/p1 "${WORK}"/p2 "${WORK}"/new 2>/dev/null || true
@@ -88,6 +86,10 @@ log "当前槽: ${CUR_DEV}  →  对侧槽: ${NEW_DEV} (新 UUID=${NEW_UUID})"
 
 # 对侧槽存在性（首启未跑/分区丢失）
 [ -b "${NEW_DEV}" ] || die "对侧槽 ${NEW_DEV} 不存在，先完成首启双槽初始化"
+
+# shared(p4)：解包目录所在，必须已挂载（busybox 无 mountpoint，查 /proc/mounts）
+grep -q " /mnt/shared " /proc/mounts || mount -t ext4 "${PT_PRE}4" /mnt/shared 2>/dev/null || true
+grep -q " /mnt/shared " /proc/mounts || die "/mnt/shared 未挂载（首启未完成？），无安全解包空间"
 blkid "${NEW_DEV}" | grep -q 'TYPE="ext4"' || warn "对侧槽不是 ext4（${NEW_DEV}），mkfs 将覆盖"
 
 # ---------- 3. 几何校验（新固件 rootfs 必须装得进对侧槽）----------
@@ -98,7 +100,7 @@ NEW_SECTORS=$(blockdev --getsz "${NEW_DEV}")
 
 # ---------- 4. 写 p1 boot（文件级，保留 FAT UUID）----------
 # 系统已自动挂载 /boot（首启 uci fstab 段）；没挂则手动挂。
-mountpoint -q /boot || mount -t vfat "${PT_PRE}1" /boot || die "挂载 /boot 失败"
+grep -q " /boot " /proc/mounts || mount -t vfat "${PT_PRE}1" /boot || die "挂载 /boot 失败"
 ROLLBACK_DIR=/mnt/shared/.dualslot-rollback
 # 回滚保险放 shared(p4)：跨槽存活，新槽启动失败也能读到
 mountpoint -q /mnt/shared || mount -t ext4 "${PT_PRE}4" /mnt/shared 2>/dev/null || true
