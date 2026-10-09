@@ -51,6 +51,8 @@ log "① 解开 openwrt 通用 rootfs →（全新临时装配目录，避开历
 # 每次用独立临时目录装配：既干净可复现，又绕开 owrt/rootfs 里可能存在的
 # 非本用户可删的 root 属主文件（guestfish/sudo 遗留）。
 ROOTFS_DIR=$(mktemp -d "$OWRT/.assemble.XXXXXX")
+# boot-files 同步重建（kernel 件每次从源拷贝，防陈旧）
+rm -rf "$OWRT/boot-files"; mkdir -p "$OWRT/boot-files/dtb"
 # 安全清理：③b 会在 ROOTFS_DIR 下 bind mount proc/sys/dev。若卸载失败还照常
 # rm -rf，会顺着 bind mount 删到宿主的 /proc —— 必须先确认无残留挂载点再删。
 cleanup_rootfs() {
@@ -67,26 +69,33 @@ cleanup_rootfs() {
 trap cleanup_rootfs EXIT
 tar -xf "$OWRT/$OWRT_TAR" -C "$ROOTFS_DIR"
 
-log "② 放入内核（boot/ + lib/modules + usr/lib/linux-image dtb）"
-mkdir -p "$ROOTFS_DIR/boot"
-cp "$VMLINUZ" "$ROOTFS_DIR/boot/vmlinuz-$KVER"
-[ -f "$INITRD_SRC" ] && cp "$INITRD_SRC" "$ROOTFS_DIR/boot/initrd.img-$KVER"
+# lubancat1 对齐布局：kernel/initrd/dtb 分离到 boot 分区（p2 FAT），rootfs 不含。
+# boot-files/ 由本步产出、50 步喂给 build-image 的 copy-in。
+log "② 放入内核：rootfs 只留 lib/modules；vmlinuz/initrd/dtb → boot-files/（lubancat1 布局）"
+mkdir -p "$ROOTFS_DIR/boot" "$OWRT/boot-files/dtb"
+cp "$VMLINUZ" "$OWRT/boot-files/vmlinuz"
+[ -f "$INITRD_SRC" ] && cp "$INITRD_SRC" "$OWRT/boot-files/initrd.img"
 # 清掉 openwrt 自带模块目录，只保留 A5E 内核的（版本必须与 vmlinuz 一致）
 rm -rf "$ROOTFS_DIR/lib/modules"; mkdir -p "$ROOTFS_DIR/lib/modules"
 cp -a "$MODULES_SRC" "$ROOTFS_DIR/lib/modules/$KVER"
-# 设备树：放进 /usr/lib/linux-image-<KVER>/allwinner/（Debian/Radxa 内核 deb 标准布局），
-# 匹配 extlinux 的 fdtdir /usr/lib/linux-image-<KVER>/（Radxa u-boot 按 compatible 到 allwinner/ 匹配）。
-# ❗ 之前拷到 /boot/dts 且按 maxdepth 1 找，kernel-actions 的 dtb 在 allwinner/ 子目录 → 拷空。
-DTB_DST="$ROOTFS_DIR/usr/lib/linux-image-$KVER/allwinner"
-mkdir -p "$DTB_DST"
+# 设备树 → boot-files/dtb/（extlinux 用 fdt 单文件指它）
 if [ -f "$DTB_SRC_DIR/allwinner/$DTB" ]; then
-  cp "$DTB_SRC_DIR/allwinner/$DTB" "$DTB_DST/"      # kernel-actions：在 allwinner/ 子目录
+  cp "$DTB_SRC_DIR/allwinner/$DTB" "$OWRT/boot-files/dtb/"   # kernel-actions：allwinner/ 子目录
 elif [ -f "$DTB_SRC_DIR/$DTB" ]; then
-  cp "$DTB_SRC_DIR/$DTB" "$DTB_DST/"                # rsdk：KERNEL_DIR 顶层
+  cp "$DTB_SRC_DIR/$DTB" "$OWRT/boot-files/dtb/"             # rsdk：KERNEL_DIR 顶层
 else
   die "找不到 a5e dtb（$DTB）于 $DTB_SRC_DIR（allwinner/ 或顶层均无）"
 fi
-echo "   dtb → $DTB_DST/$DTB"
+echo "   dtb → boot-files/dtb/$DTB（rootfs 不再含 /usr/lib/linux-image）"
+
+# modules.dep.bin：OpenWrt 的 modprobe(/sbin/kmodloader→libkmod) 只认 .bin 索引，
+# 而 kernel-actions 打包的 modules 目录只有文本 modules.dep → 板上 modprobe 任何
+# 模块都 255（vfat 等 =m 模块加载不了, /boot(FAT) 挂不上）。宿主 kmod 的 depmod
+# 跨架构可读 ELF, -b 指向装配树重建索引。
+depmod -b "$ROOTFS_DIR" "$KVER" 2>/dev/null || warn "depmod -b 失败（宿主缺 kmod?）"
+[ -f "$ROOTFS_DIR/lib/modules/$KVER/modules.dep.bin" ] \
+  && echo "   ✓ modules.dep.bin 已生成（modprobe 可用）" \
+  || die "modules.dep.bin 未生成——板上 modprobe 将不可用（apt install kmod 后重试）"
 
 log "②b 放入 u-boot（build-image 从 /usr/lib/u-boot/ copy-out 后写 SPL@LBA256）"
 mkdir -p "$ROOTFS_DIR/usr/lib/u-boot"
@@ -103,26 +112,22 @@ cp -a "$AIC_FW_DIR" "$ROOTFS_DIR/lib/firmware/$AIC_FW_SUB"
 echo "   固件 $(ls "$ROOTFS_DIR/lib/firmware/$AIC_FW_SUB" | wc -l) 个 → /lib/firmware/$AIC_FW_SUB"
 
 log "③ 写引导配置 extlinux.conf + /etc/kernel/cmdline（root= 用占位，build-image 注入真实 UUID）"
-# 为何两份都要写：out/build-image（guestfish 脚本）会 copy-out 这两个文件、blkid 读 sda3
-# 的真值，先 `sed -E "s/(\s*root=\S*\s*)/ /g"` 剔掉原有 root=…，再注入 root=UUID=<真值>，
-# 最后 copy-in 回去。所以种子写什么都行（PLACEHOLDER 同样会被剔掉），但**两个文件都必须
-# 存在**，否则 build-image 的 copy-out 会失败。
-# 缩进用 TAB（extlinux 惯例，也与历史静态副本逐字节对齐）。
-# ⚠ 这两个文件曾长期在 custom/rootfs/ 下有静态副本，而第④步 overlay 会把这里生成的覆盖掉
-#   → 两处真相，改 APPEND_PARAMS 不生效（plymouth.enable=0 差点因此白加）。副本已删。
-mkdir -p "$ROOTFS_DIR/boot/extlinux" "$ROOTFS_DIR/etc/kernel"
+# lubancat1 布局：extlinux.conf 进 boot 分区（p2 FAT）。linux/initrd/fdt 路径相对
+# p2 根；root= 占位，build-image 用 blkid sda3 真值替换。
 {
   echo "## /boot/extlinux/extlinux.conf"
   echo "default l0"; echo "menu title U-Boot menu"; echo "prompt 0"; echo "timeout 10"
   echo "label l0"
   printf '\tmenu label ImmortalWrt A5E %s (%s)\n' "$KVER" "$KSRC"
-  printf '\tlinux /boot/vmlinuz-%s\n' "$KVER"
-  if [ -f "$INITRD_SRC" ]; then printf '\tinitrd /boot/initrd.img-%s\n' "$KVER"; fi
-  printf '\tfdtdir /usr/lib/linux-image-%s/\n' "$KVER"
+  printf '\tlinux /vmlinuz\n'
+  if [ -f "$INITRD_SRC" ]; then printf '\tinitrd /initrd.img\n'; fi
+  printf '\tfdt /dtb/%s\n' "$DTB"
   printf '\tappend root=UUID=PLACEHOLDER %s\n' "$APPEND_PARAMS"
-} > "$ROOTFS_DIR/boot/extlinux/extlinux.conf"
+} > "$OWRT/boot-files/extlinux.conf"
+# /etc/kernel/cmdline 仍在 rootfs（build-image 注入 UUID 后供用户态工具参考）
+mkdir -p "$ROOTFS_DIR/etc/kernel"
 printf 'root=UUID=PLACEHOLDER %s\n' "$APPEND_PARAMS" > "$ROOTFS_DIR/etc/kernel/cmdline"
-echo "   已写 boot/extlinux/extlinux.conf 与 etc/kernel/cmdline（均含 plymouth.enable=0）"
+echo "   已写 boot-files/extlinux.conf 与 etc/kernel/cmdline（均含 plymouth.enable=0）"
 
 log "③b chroot 内 apk 安装用户态必装包：$WIFI_PKGS"
 # 为何要 chroot：wifi-scripts/iw 都有 post-install 脚本（建符号链、注册 hotplug），
@@ -195,6 +200,37 @@ done
 # 部分 feed（amlogic/video）在本 target 不存在，apk 会刷 WARNING 但不影响安装
 $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add "$WIFI_WPAD_PKG" $WIFI_PKGS \
   || die "chroot apk add 失败（查 qemu-user-static/binfmt 是否可用、网络是否通）"
+# 首启双槽初始化(99-a5e-init-dualslot)需要 parted 操作 GPT。router remake 的
+# A5E rootfs 已预装 parted（参考 lubancat 集成，在 /sbin/parted 而非 /usr/sbin）——
+# 已预装则跳过；未预装（换了 rootfs 来源）才 apk add 兜底。
+if [ -x "$ROOTFS_DIR/sbin/parted" ]; then
+  echo "   ✓ parted 已预装于 rootfs（/sbin/parted，router remake 集成）"
+else
+  $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add parted \
+    || die "chroot apk add parted 失败（首启双槽初始化依赖 parted）"
+  [ -x "$ROOTFS_DIR/sbin/parted" ] || die "parted 装上但缺 /sbin/parted"
+  echo "   ✓ parted 安装完成（/sbin/parted）"
+fi
+# tune2fs：dd 复制槽A→槽B 会把 fs UUID 一并复制（两槽 UUID 相同, OTA 按 UUID
+# 切槽会失效）→ 首启用 tune2fs -U 给槽B 换新 UUID。ImmortalWrt 裁剪版 e2fsprogs
+# 可能不带 tune2fs（板上实测缺）→ 检测优先, 安装兜底。
+if [ -x "$ROOTFS_DIR/usr/sbin/tune2fs" ] || [ -x "$ROOTFS_DIR/sbin/tune2fs" ]; then
+  echo "   ✓ tune2fs 已预装（dd 后给槽B换 UUID 用）"
+else
+  # rootfs 的 apk 数据库可能已有 tune2fs 记录但二进制被 remake 裁剪 →
+  # apk add 认为已满足不装文件 → 先 add, 仍缺则 apk fix 补装缺失文件。
+  if ! $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add tune2fs; then
+    die "chroot apk add tune2fs 失败（首启依赖 tune2fs 修正槽B UUID）"
+  fi
+  if ! { [ -x "$ROOTFS_DIR/usr/sbin/tune2fs" ] || [ -x "$ROOTFS_DIR/sbin/tune2fs" ]; }; then
+    warn "apk add 后仍缺 tune2fs（db 已满足但文件被裁剪）→ apk fix 补装"
+    $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk fix tune2fs \
+      || die "chroot apk fix tune2fs 失败"
+  fi
+  { [ -x "$ROOTFS_DIR/usr/sbin/tune2fs" ] || [ -x "$ROOTFS_DIR/sbin/tune2fs" ]; } \
+    || die "tune2fs 装上仍缺二进制"
+  echo "   ✓ tune2fs 安装完成"
+fi
 for d in dev sys proc; do
   $SUDO umount "$ROOTFS_DIR/$d" 2>/dev/null || $SUDO umount -l "$ROOTFS_DIR/$d" 2>/dev/null || true
 done

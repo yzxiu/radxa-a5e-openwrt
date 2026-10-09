@@ -27,6 +27,10 @@ on:
         description: 'kernel-actions release (latest 或具体 v*)'
         required: false
         default: 'latest'
+      rootfs_tag:
+        description: 'router release (latest 或具体 ImmortalWrt-*)'
+        required: false
+        default: 'latest'
   push:
     branches: ['**']          # 任意分支都触发；release 另受 main 限制（见 release job 的 if）
     paths:
@@ -61,7 +65,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             curl ca-certificates xz-utils cpio rsync python3 tar coreutils \
-            e2fsprogs util-linux parted \
+            e2fsprogs util-linux parted mtools file kmod \
             qemu-user-static binfmt-support
           # 40 步要 chroot 进 aarch64 rootfs 跑 apk（wifi-scripts/iw 的 post-install
           # 必须在目标环境里执行），靠 qemu-user + binfmt_misc 做用户态模拟。
@@ -100,6 +104,9 @@ jobs:
         run: bash scripts/25-fetch-kernel.sh
 
       - name: 30 fetch ImmortalWrt armsr rootfs
+        env:
+          OWRT_TAG: ${{ inputs.rootfs_tag || 'latest' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/30-fetch-openwrt.sh
 
       - name: 40 assemble OpenWrt rootfs.tar
@@ -115,7 +122,18 @@ jobs:
           L=$(mktemp); tar -tf "$T" > "$L"
           chk()  { grep -qE "$1" "$L" && echo "✓ $2" || { echo "✗ 缺：$2"; exit 1; }; }
           nchk() { if grep -qE "$1" "$L"; then echo "✗ 不该有：$2"; exit 1; else echo "✓ $2"; fi; }
-          chk  "usr/lib/linux-image-[^/]+/allwinner/sun55i-a527-cubie-a5e\.dtb" "a5e dtb 在 usr/lib/linux-image/allwinner/"
+          chk  "sbin/parted$"                          "parted 在位（首启双槽初始化用）"
+          chk  "usr/sbin/openwrt-update-a5e$"          "OTA 底层脚本在位"
+          chk  "usr/sbin/upgrade-a5e\.sh$"             "OTA 升级封装脚本在位"
+          # lubancat1 布局：dtb/kernel 已分离到 boot-files/（p2 FAT），不在 rootfs tar 里
+          [ -f "../owrt/boot-files/dtb/sun55i-a527-cubie-a5e.dtb" ] \
+            && echo "✓ dtb 在 boot-files/dtb/（lubancat1 布局，进 p2 FAT）" \
+            || { echo "✗ 缺 boot-files/dtb/sun55i-a527-cubie-a5e.dtb（40 步未产出）"; exit 1; }
+          [ -f "../owrt/boot-files/vmlinuz" ] || { echo "✗ 缺 boot-files/vmlinuz"; exit 1; }
+          [ -f "../owrt/boot-files/initrd.img" ] || { echo "✗ 缺 boot-files/initrd.img"; exit 1; }
+          [ -f "../owrt/boot-files/extlinux.conf" ] \
+            && echo "✓ boot-files/extlinux.conf 存在（build-image 注入 root=UUID 后进 p2）" \
+            || { echo "✗ 缺 boot-files/extlinux.conf"; exit 1; }
           nchk "etc/init\.d/bridge-modules" "无 bridge workaround（kernel-actions 已 builtin）"
           # ---- WiFi：缺任一项都是「镜像能启动但 wlan 静默不在」，必须在这里卡住 ----
           chk  "lib/firmware/aic8800_fw/SDIO/aic8800D80/fmacfw_8800d80_u02\.bin" "AIC8800D80 固件在位（驱动 filp_open 直读）"
@@ -145,30 +163,27 @@ jobs:
           else
             echo "✓ wireless 未设 option country"
           fi
-          # ---- 引导配置：plymouth 必须关，否则串口控制台不可用 ----
-          # initramfs 的 /scripts/init-premount/plymouth 里 SPLASH 默认就是 "true"，只有
-          # cmdline 出现 nosplash* / plymouth.enable=0 才置 false；而 init-bottom/plymouth
-          # 只做 --newroot 交接、从不 quit（systemd 上由 plymouth-quit.service 收尾，本
-          # rootfs 用 procd，没人收）→ plymouthd 跨过 switch_root 常驻，一直 open 着
-          # /dev/ttyAS0 与 askfirst 的 shell 抢输入。板上实测：同一条 14 字节命令，
-          # plymouthd 活着只回 1 字节；且它把 tty 置 raw(ISIG off) 后不恢复，
-          # 导致 Ctrl+C 杀不掉前台进程（sleep/top 都退不出）、方向键转义序列被拆散。
-          chk  "boot/extlinux/extlinux\.conf$" "/boot/extlinux/extlinux.conf 存在（build-image 要 copy-out）"
-          chk  "etc/kernel/cmdline$"           "/etc/kernel/cmdline 存在（build-image 要 copy-out）"
-          for f in ./boot/extlinux/extlinux.conf ./etc/kernel/cmdline; do
-            if tar -xOf "$T" "$f" 2>/dev/null | grep -q "plymouth\.enable=0"; then
-              echo "✓ $f 含 plymouth.enable=0"
+          # ---- 引导配置：plymouth 必须关（串口控制台），两份文件 ----
+          # lubancat1 布局：extlinux.conf 在 boot-files/（进 p2 FAT）；cmdline 在 tar 里。
+          chk  "etc/kernel/cmdline$"           "/etc/kernel/cmdline 存在"
+          for f in ../owrt/boot-files/extlinux.conf "tar:$T:./etc/kernel/cmdline"; do
+            if [[ "$f" == tar:* ]]; then
+              CNT=$(tar -xOf "$T" "${f#tar:$T:}" 2>/dev/null)
             else
-              echo "✗ $f 缺 plymouth.enable=0（plymouthd 会常驻占串口：输入被吃、方向键失效、Ctrl+C 无效）"; exit 1
+              CNT=$(cat "$f" 2>/dev/null)
+            fi
+            if printf '%s' "$CNT" | grep -q "plymouth\.enable=0"; then
+              echo "✓ ${f##*/} 含 plymouth.enable=0"
+            else
+              echo "✗ $f 缺 plymouth.enable=0（plymouthd 会常驻占串口）"; exit 1
             fi
           done
-          # 两份必须同源（都来自 00-lib.sh 的 APPEND_PARAMS）。历史上这两个文件曾在
-          # custom/rootfs/ 下有静态副本并被 overlay 覆盖回去，形成两处真相。
+          # 两份必须同源（都来自 00-lib.sh 的 APPEND_PARAMS）
           norm() { printf '%s' "$1" | tr -s '[:space:]' ' ' | sed 's/^ //; s/ $//'; }
-          A=$(norm "$(tar -xOf "$T" ./boot/extlinux/extlinux.conf 2>/dev/null | sed -nE 's/^[[:space:]]*append[[:space:]]+//p' | sed -E 's/[[:space:]]*root=[^[:space:]]*[[:space:]]*/ /g')")
+          A=$(norm "$(sed -nE 's/^[[:space:]]*append[[:space:]]+//p' ../owrt/boot-files/extlinux.conf | sed -E 's/[[:space:]]*root=[^[:space:]]*[[:space:]]*/ /g')")
           C=$(norm "$(tar -xOf "$T" ./etc/kernel/cmdline 2>/dev/null | sed -E 's/[[:space:]]*root=[^[:space:]]*[[:space:]]*/ /g')")
           if [ "$A" = "$C" ]; then
-            echo "✓ extlinux append 与 /etc/kernel/cmdline 参数一致"
+            echo "✓ boot-files extlinux append 与 /etc/kernel/cmdline 参数一致"
           else
             echo "✗ 两份引导参数不一致（有一处没跟着 APPEND_PARAMS 改）"; echo "  append : $A"; echo "  cmdline: $C"; exit 1
           fi
@@ -204,9 +219,26 @@ jobs:
           IMG="../owrt-a5e.img"
           [ -f "$IMG" ] || { echo "✗ 没产出 img"; exit 1; }
           ls -lh "$IMG"; cat "../owrt-a5e.img.sha256"
-          S=$(partx -g -o START --nr 3 "$IMG"); N=$(partx -g -o SECTORS --nr 3 "$IMG")
+          # lubancat1 布局: p1 128M boot(FAT) / p2 960M rootfs 槽A
+          partx -s "$IMG" | tee /dev/stderr | awk '
+            NR>1 { n[$1]=$5; }
+            END {
+              if (n[1] != "128M") { print "✗ p1(boot) 应 128M, 实 " n[1]; exit 1 }
+              if (n[2] != "960M") { print "✗ p2(rootfs) 应 960M, 实 " n[2]; exit 1 }
+              
+              print "✓ 分区表 p1/p2 = 128M boot + 960M rootfs（lubancat1 布局）"
+            }'
+          # p2 FAT 里的启动件（mtools 免挂载读取）
+          B1=$(( $(partx -g -o START --nr 1 "$IMG") * 512 ))
+          mdir  -i "$IMG@@$B1" ::/ && mdir -i "$IMG@@$B1" ::/dtb/ | grep -q "sun55i-a527-cubie-a5e.dtb" && echo "✓ dtb 在 p1 /dtb/（p1 根=挂载点/boot）"
+          mtype -i "$IMG@@$B1" ::/extlinux/extlinux.conf | grep -q "root=UUID=" && echo "✓ extlinux root=UUID 已注入"
+          # p3 ext4 的 rootfs UUID 与 extlinux 指向一致
+          S=$(partx -g -o START --nr 2 "$IMG"); N=$(partx -g -o SECTORS --nr 2 "$IMG")
           dd if="$IMG" of=/tmp/v.img bs=512 skip="$S" count="$N" status=none
-          debugfs -R "stat /usr/lib/linux-image-*/allwinner/sun55i-a527-cubie-a5e.dtb" /tmp/v.img 2>/dev/null | grep -E "Inode|Size" && echo "✓ dtb 落地"
+          U3=$(debugfs -R "cat /etc/fstab" /tmp/v.img 2>/dev/null | awk '$2=="/"{print $1}')
+          U2=$(mtype -i "$IMG@@$B1" ::/extlinux/extlinux.conf | grep -oE "root=UUID=[^ ]*")
+          [ "${U3#UUID=}" = "${U2#root=UUID=}" ] && echo "✓ extlinux root= 与 p2 fstab UUID 一致（$U3）" \
+            || { echo "✗ UUID 不一致: extlinux=$U2 fstab=$U3"; exit 1; }
           rm -f /tmp/v.img
 
       - name: stage image + tar.gz into workspace
@@ -226,6 +258,18 @@ jobs:
             dist/owrt-a5e.img.tar.gz
             dist/owrt-a5e.img.sha256
             dist/build-info.env
+          retention-days: 30
+          if-no-files-found: error
+
+      # 单独的压缩包 artifact：owrt-a5e-img artifact 是 zip 打包(1.1G)，
+      # 只想拿 128M tar.gz 时直接下这个，免下载解压全量 zip。
+      - name: upload compressed image (tar.gz 单独入口)
+        uses: actions/upload-artifact@v4
+        with:
+          name: owrt-a5e-img-tar-gz
+          path: |
+            dist/owrt-a5e.img.tar.gz
+            dist/owrt-a5e.img.sha256
           retention-days: 30
           if-no-files-found: error
 
