@@ -154,9 +154,13 @@ U-Boot 主程序。**与分区表类型无关**（裸扇区写）。
 - OpenWrt 首启自动执行 `/etc/uci-defaults/*`，**成功自删**；失败/中途断电
   文件保留，**下次启动重跑**——天然的两段式调度（不需要 flag 文件安排重试）。
 - 序号 99：排在 `10-fstab`（生成 /etc/config/fstab）之后，脚本可安全 uci 操作 fstab。
-- **首启耗时**：分区秒级 + mkfs 数秒 + dd 960M（1-3 分钟）+ e2fsck 数秒。
+- **首启耗时**：分区秒级 + mkfs 数秒 + dd 960M（约 40 秒，分块打百分比进度）+ e2fsck 数秒。
   期间控制台停在 `root@(none)`、网卡全 DOWN——**这是正常中间态**（uci-defaults
   跑在网络服务启动之前），不是故障。完成后继续启动 → `root@ImmortalWrt`。
+- **首启日志（带 `>>>` 前缀直接上串口，混在 dmesg 里一眼可辨）**：
+  系统起来后查看：`logread -e dualslot`（busybox logread 按标签过滤用 `-e`，
+  `-t` 只是显示时间戳）。串口实时窗口期约 1 分钟，错过可在系统内用该命令回看
+  （重启后内存日志清空，需留存的话 `logread -e dualslot > /root/firstboot.log`）。
 
 ### 3.2 执行流程（10 步）
 
@@ -289,6 +293,18 @@ extlinux.conf 唯一一份在 p1（FAT）。切槽 = 改它的 `root=UUID=` 指�
 - commit：`56c1d43`；插曲：重复 GITHUB_TOKEN key 致 workflow 启动即失败（0 job），
   `bebcc56` 修复。注意：本地 yaml.safe_load 对重复 key 静默覆盖，**查不出**。
 
+### K13. 首启日志"看不见"三连（输出通道被层层吞掉）
+- **现象**：首启分区过程串口无任何输出，像卡死。
+- **根因链**：uci-defaults 由 procd boot 服务执行，其 **stdout 被吞**
+  （裸 echo 不可见）→ 加 `logger -s`（写 stderr）**也被吞** → 最终
+  `echo "<5>>> dualslot: ..." > /dev/kmsg` 走 kernel console 通道必达。
+  另一教训：`logread -t dualslot` 的 `-t` 是"显示时间戳"不是按标签过滤，
+  过滤要用 `-e`（busybox logread）。
+- **顺带**：kmsg 消息默认格式与内核日志雷同易淹没在 dmesg 洪流里，故加
+  `>>>` 醒目前缀 + notice 级别；dd 进度改分块复制（busybox dd 无
+  status=progress），每 10 块打百分比。
+- commit：`62d5d5e`（logger -s 版）、`8f0636c`（kmsg 版）、`d03103b`（>>> 醒目版）
+
 ### K12. 其他小坑
 - `etc/kernel` 目录忘建（重写 40 步 ③ 段时丢了 mkdir）→ `e413c00`
 - `/boot/extlinux` mkdir 在 mount p1 之前（建在 p2 上）→ `ad3c01b`
@@ -311,6 +327,7 @@ mount | grep -E "/boot |shared"          # 均已挂载
 cat /proc/filesystems | grep vfat        # builtin 直出（无模块加载）
 dmesg | grep -c GROWROOT                 # 0（扩容已禁用）
 cat /mnt/mmcblk1p3/.dualslot-ready       # slot=b uuid=<槽B UUID>
+logread -e dualslot                     # 首启全程日志（>>> 前缀，38 行左右）
 ```
 
 OTA 主脚本（`upgrade-a5e.sh` + `openwrt-update-a5e`）见另文。
