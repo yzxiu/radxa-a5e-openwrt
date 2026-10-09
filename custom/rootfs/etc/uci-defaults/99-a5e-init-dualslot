@@ -25,10 +25,12 @@ SUCCESS="[\033[92m SUCCESS \033[0m]"
 WARN="[\033[93m WARN \033[0m]"
 ERROR="[\033[91m ERROR \033[0m]"
 
-log()  { echo -e "${INFO} $*"; }
-ok()   { echo -e "${SUCCESS} $*"; }
-warn() { echo -e "${WARN} $*"; }
-die()  { echo -e "${ERROR} $*"; exit 1; }
+# uci-defaults 阶段的 stdout 不一定上串口（procd boot 服务输出被吞），
+# logger -s 强制写控制台 + 系统日志（logread -t dualslot 可查全程）。
+log()  { echo -e "${INFO} $*"; logger -s -t dualslot "$*" 2>/dev/null || true; }
+ok()   { echo -e "${SUCCESS} $*"; logger -s -t dualslot "$*" 2>/dev/null || true; }
+warn() { echo -e "${WARN} $*"; logger -s -t dualslot "WARN: $*" 2>/dev/null || true; }
+die()  { echo -e "${ERROR} $*"; logger -s -t dualslot "ERROR: $*" 2>/dev/null || true; exit 1; }
 
 echo -e "${STEPS} A5E 双槽初始化开始"
 
@@ -156,10 +158,21 @@ mkfs.ext4 -q -F -U "${UUID_S}" -L shared-data -E lazy_journal_init=0,lazy_itable
 # ---------- 6. dd 复制 p2 → p3 (槽 B 初始副本) ----------
 # 两槽分区等大, 位级复制。在线复制运行中的根: sync 先行, 复制后 e2fsck 重放
 # journal 修复一致性。首启阶段写流量极小, 且槽 B 之后会被 OTA 整树覆盖。
-echo -e "${STEPS} dd 复制 ${PT_PRE}2 → ${PT_PRE}3 (在线, 请稍候)"
+echo -e "${STEPS} dd 复制 ${PT_PRE}2 → ${PT_PRE}3 (在线, 约1-3分钟)"
 sync
-dd if="${PT_PRE}2" of="${PT_PRE}3" bs=4M conv=fsync \
-    || die "dd 复制失败"
+# busybox dd 不支持 status=progress → 分块复制打百分比进度
+TOTAL_BLKS=$(( A_SIZE * 512 / 4194304 ))
+[ "${TOTAL_BLKS}" -lt 1 ] && TOTAL_BLKS=1
+i=0
+while [ "${i}" -lt "${TOTAL_BLKS}" ]; do
+    dd if="${PT_PRE}2" of="${PT_PRE}3" bs=4M count=1 seek="${i}" skip="${i}" conv=notrunc 2>/dev/null \
+        || die "dd 复制失败(块 ${i}/${TOTAL_BLKS})"
+    i=$((i + 1))
+    pct=$(( i * 100 / TOTAL_BLKS ))
+    [ $(( i % 10 )) -eq 0 ] || [ "${i}" = "${TOTAL_BLKS}" ] \
+        && log "复制进度 ${i}/${TOTAL_BLKS} (${pct}%)"
+done
+sync
 e2fsck -f -y "${PT_PRE}3" >/dev/null 2>&1 || warn "e2fsck p3 有修正(在线复制正常现象)"
 # dd 把槽A 的 fs UUID/LABEL 一并复制 → 两槽 UUID 相同, OTA 按 root=UUID 切槽
 # 会失效, label 也无法区分槽位。给槽B 换独立 UUID + LABEL
