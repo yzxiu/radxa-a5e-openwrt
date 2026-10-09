@@ -66,7 +66,7 @@ fi
 # 新 img 的分区几何（custom/build-image 定义，变更需同步此处）：
 IMG_P1_START=32768;  IMG_P1_SECTORS=262144
 IMG_P2_START=294912; IMG_P2_SECTORS=1966080
-IMG_SECTORS=$(( $(stat -c %s "${SRC_IMG}") / 512 ))
+IMG_SECTORS=$(( $(wc -c < "${SRC_IMG}") / 512 ))   # busybox 无 stat
 [ "${IMG_SECTORS}" -ge "$((IMG_P2_START + IMG_P2_SECTORS))" ] \
     || die "img 尺寸异常: ${IMG_SECTORS} sectors < p2 结束 $((IMG_P2_START + IMG_P2_SECTORS))"
 IMG_P1_OFF=$(( IMG_P1_START * 512 ))
