@@ -44,10 +44,42 @@ for tool in tar blkid tune2fs dd e2fsck mcopy; do
     command -v "$tool" >/dev/null 2>&1 || die "缺依赖: $tool"
 done
 
-# ---------- 1. 解固件 + 挂新 img ----------
-echo -e "${STEPS} A5E 双槽升级"
+# ---------- 1. 判槽（必须在解包前：WORK 放哪取决于盘符） ----------
+# ★ 按挂载点判槽（ophub 法）：cmdline UUID 反查在 UUID 错乱时会判错槽（2026-10-09
+#   实机事故：p2/p3 同 UUID → 从 p3 启动 → 旧版首启以 p3 为基准算槽 B → dd 自复制
+#   → e2fsck 在运行中的根上跑 → 文件系统损坏）。
+CUR_DEV="$(awk '$2=="/"{print $1}' /proc/mounts)"
+case "${CUR_DEV}" in
+    /dev/mmcblk*p2) NEW_DEV="${CUR_DEV%p2}p3"; NEW_LABEL="rootfs-b" ;;
+    /dev/mmcblk*p3) NEW_DEV="${CUR_DEV%p3}p2"; NEW_LABEL="rootfs" ;;
+    *)  die "根挂载点 ${CUR_DEV} 不是 mmcblk p2/p3，非双槽布局（先跑首启初始化）" ;;
+esac
+DISK="$(echo "${NEW_DEV}" | sed -E 's/p[0-9]+$//')"
+PT_PRE="${DISK}p"
+NEW_UUID="$(cat /proc/sys/kernel/random/uuid)"
+log "当前槽: ${CUR_DEV}  →  对侧槽: ${NEW_DEV} (新 UUID=${NEW_UUID})"
+
+# 对侧槽存在性（首启未跑/分区丢失）
+[ -b "${NEW_DEV}" ] || die "对侧槽 ${NEW_DEV} 不存在，先完成首启双槽初始化"
+
+# ★ 对侧槽必须完全未挂载（ophub 同款防护，也是 2026-10-09 事故根因）：
+#   内核挂载中的 ext4 会随时把缓存的旧 superblock 回写设备——dd/e2fsck/tune2fs
+#   直接操作块设备的写入会被回写静默覆盖（p3 UUID 改不掉的元凶）。
+for mp in $(awk -v d="${NEW_DEV}" '$1==d{print $2}' /proc/mounts); do
+    umount "${mp}" 2>/dev/null || umount -f "${mp}" 2>/dev/null \
+        || die "卸载对侧槽挂载点失败: ${mp}（请手工 umount 后重试）"
+done
+if awk -v d="${NEW_DEV}" '$1==d{f=1} END{exit !f}' /proc/mounts; then
+    die "对侧槽 ${NEW_DEV} 仍被挂载，拒绝写入（防止内核缓存回写覆盖）"
+fi
+
+# shared(p4)：解包目录所在，必须已挂载（busybox 无 mountpoint，查 /proc/mounts）
+grep -q " /mnt/shared " /proc/mounts || mount -t ext4 "${PT_PRE}4" /mnt/shared 2>/dev/null || true
+grep -q " /mnt/shared " /proc/mounts || die "/mnt/shared 未挂载（首启未完成？），无安全解包空间"
+blkid "${NEW_DEV}" | grep -q 'TYPE="ext4"' || warn "对侧槽不是 ext4（${NEW_DEV}），将被覆盖"
+
+# ---------- 1b. 解固件 ----------
 # 解包目录必须在磁盘上：/tmp 是 tmpfs(≈半内存, 1G 板约 512M)，装不下 1.1G 的 img
-# → 用 shared 分区（p4，27G）。挂载检查在判槽(拿到 PT_PRE)之后；中断残留靠 cleanup。
 WORK=$(mktemp -d /mnt/shared/.ota-tmp.XXXXXX)
 cleanup() {
     umount -f "${WORK}"/new 2>/dev/null || true
@@ -71,29 +103,6 @@ IMG_SECTORS=$(( $(wc -c < "${SRC_IMG}") / 512 ))   # busybox 无 stat
     || die "img 尺寸异常: ${IMG_SECTORS} sectors < p2 结束 $((IMG_P2_START + IMG_P2_SECTORS))"
 IMG_P1_OFF=$(( IMG_P1_START * 512 ))
 log "新固件就绪: ${SRC_IMG}（p1@LBA${IMG_P1_START} p2@LBA${IMG_P2_START}）"
-
-# ---------- 2. 判槽 ----------
-CUR_UUID="$(sed -n 's/.*root=UUID=\([^ ]*\).*/\1/p' /proc/cmdline)"
-[ -n "${CUR_UUID}" ] || die "cmdline 无 root=UUID"
-CUR_DEV="$(blkid -U "${CUR_UUID}" 2>/dev/null)" || die "找不到根设备 ${CUR_UUID}"
-DISK="$(echo "${CUR_DEV}" | sed -E 's/p[0-9]+$//')"
-PT_PRE="${DISK}p"
-
-case "${CUR_DEV}" in
-    *p2) NEW_DEV="${PT_PRE}3"; NEW_LABEL="rootfs-b" ;;
-    *p3) NEW_DEV="${PT_PRE}2"; NEW_LABEL="rootfs" ;;
-    *)   die "根分区 ${CUR_DEV} 不是 p2/p3，非双槽布局（先跑首启初始化）" ;;
-esac
-NEW_UUID="$(cat /proc/sys/kernel/random/uuid)"
-log "当前槽: ${CUR_DEV}  →  对侧槽: ${NEW_DEV} (新 UUID=${NEW_UUID})"
-
-# 对侧槽存在性（首启未跑/分区丢失）
-[ -b "${NEW_DEV}" ] || die "对侧槽 ${NEW_DEV} 不存在，先完成首启双槽初始化"
-
-# shared(p4)：解包目录所在，必须已挂载（busybox 无 mountpoint，查 /proc/mounts）
-grep -q " /mnt/shared " /proc/mounts || mount -t ext4 "${PT_PRE}4" /mnt/shared 2>/dev/null || true
-grep -q " /mnt/shared " /proc/mounts || die "/mnt/shared 未挂载（首启未完成？），无安全解包空间"
-blkid "${NEW_DEV}" | grep -q 'TYPE="ext4"' || warn "对侧槽不是 ext4（${NEW_DEV}），mkfs 将覆盖"
 
 # ---------- 3. 几何校验（新固件 rootfs 必须装得进对侧槽）----------
 NEW_SECTORS=$(cat "/sys/class/block/$(basename "${NEW_DEV}")/size")   # busybox 无 blockdev, sysfs 取扇区数
@@ -131,6 +140,12 @@ dd if="${SRC_IMG}" of="${NEW_DEV}" bs=4M \
    conv=fsync 2>&1 | tail -2 || die "dd 失败"
 e2fsck -f -y "${NEW_DEV}" >/dev/null 2>&1 || warn "e2fsck 有修正（在线复制正常现象）"
 tune2fs -U "${NEW_UUID}" -L "${NEW_LABEL}" "${NEW_DEV}" || die "tune2fs 失败"
+# ★ 验证 UUID/LABEL 真的写进设备（tune2fs 对脏状态可能静默失败；不验证等于没改）
+ACTUAL_UUID="$(blkid -s UUID -o value "${NEW_DEV}" 2>/dev/null)"
+ACTUAL_LABEL="$(blkid -s LABEL -o value "${NEW_DEV}" 2>/dev/null)"
+[ "${ACTUAL_UUID}" = "${NEW_UUID}" ] && [ "${ACTUAL_LABEL}" = "${NEW_LABEL}" ] \
+    || die "UUID/LABEL 校验失败: 期望 ${NEW_UUID}/${NEW_LABEL} 实得 ${ACTUAL_UUID:-?}/${ACTUAL_LABEL:-?}（设备仍被挂载缓存回写? 前方已卸载则不应发生）"
+log "UUID/LABEL 已验证: ${ACTUAL_UUID} / ${ACTUAL_LABEL}"
 sync
 
 # ---------- 6. KVER 绑定处理 ----------

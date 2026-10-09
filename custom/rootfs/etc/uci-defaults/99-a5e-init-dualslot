@@ -40,12 +40,12 @@ echo "<5>>>> dualslot: A5E 双槽初始化开始（进度日志带 >>> 前缀）
 echo "<5>>>> =====================================================" > /dev/kmsg 2>/dev/null
 echo -e "${STEPS} A5E 双槽初始化开始"
 
-# ---------- 1. 定位引导盘 ----------
-ROOT_UUID="$(sed -n 's/.*root=UUID=\([^ ]*\).*/\1/p' /proc/cmdline)"
-[ -n "${ROOT_UUID}" ] || die "cmdline 里没有 root=UUID=，无法定位根分区"
-
-ROOT_DEV="$(blkid -U "${ROOT_UUID}" 2>/dev/null)"
-[ -n "${ROOT_DEV}" ] || die "blkid 找不到 UUID=${ROOT_UUID} 对应的设备"
+# ---------- 1. 定位引导盘（按挂载点，不用 cmdline UUID 反查 ----------
+# ★ 2026-10-09 事故：p2/p3 同 UUID（tune2fs 被挂载缓存回写覆盖）时 blkid -U
+#   反查可能返回非根在用的分区 → 后续几何基准全错。挂载点是运行事实，不会错。
+ROOT_DEV="$(awk '$2=="/"{print $1}' /proc/mounts)"
+[ -n "${ROOT_DEV}" ] || die "无法从 /proc/mounts 定位根分区"
+# （幂等双保险见下方“幂等检查”段：p3 有 .dualslot-ready 则直接退出）
 
 case "${ROOT_DEV}" in
     /dev/mmcblk*p[0-9]*) DISK="$(echo "${ROOT_DEV}" | sed -E 's/p[0-9]+$//')" ;;
@@ -54,12 +54,19 @@ case "${ROOT_DEV}" in
 esac
 PT_PRE="${DISK}p"
 
-# 布局自检：根应在 p3（槽A）；p2 是 boot(FAT)
+# 布局自检：根必须在 p2（槽A）；p1 是 boot(FAT)。
+# 根在 p3 = 从槽 B 启动——这是 OTA 后的正常首启（新固件 uci-defaults 全量跑），
+# 双槽几何已由槽A时代建好，绝不能再改造：以当前根为基准算槽 B 会指向自己
+# → dd 自复制 → e2fsck 在运行中的根上跑 → 文件系统损坏（2026-10-09 实机事故）。
+# 用 exit 0（不是 die）：uci-defaults 对非零退出会滞留脚本每启重跑。
 case "${ROOT_DEV}" in
     *p2) : ;;
-    *) warn "根分区是 ${ROOT_DEV}（非 p2），可能是旧布局或手工调整，按剩余空间追加槽 B" ;;
+    *p3) log "根在槽 B(${ROOT_DEV})：OTA 后新槽首启，双槽几何已建好，跳过"
+         exit 0 ;;
+    *)  log "根分区是 ${ROOT_DEV}（非 p2/p3），非双槽布局，跳过"
+        exit 0 ;;
 esac
-log "槽 A: ${ROOT_DEV} (UUID=${ROOT_UUID})"
+log "槽 A: ${ROOT_DEV}（按挂载点定位）"
 log "目标盘: ${DISK}"
 
 # ---------- 1b. 清理 block-mount 竞争挂载 ----------
