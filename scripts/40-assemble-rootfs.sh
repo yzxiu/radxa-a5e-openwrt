@@ -231,6 +231,28 @@ else
     || die "tune2fs 装上仍缺二进制"
   echo "   ✓ tune2fs 安装完成"
 fi
+# mtools: OTA 无 loop 方案从固件 img 的 FAT p1 提取 kernel/dtb/extlinux(@@偏移 mcopy)。
+#   最终归属 router radxa-a5e.conf D 组(41e1d5d)；此处为 router 新 rootfs 发布前的
+#   临时保障, 上游 release 验证后可删。
+if [ -x "$ROOTFS_DIR/usr/bin/mcopy" ]; then
+  echo "   ✓ mtools 已预装于 rootfs（/usr/bin/mcopy）"
+else
+  $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add mtools \
+    || die "chroot apk add mtools 失败（OTA 提取 p1 依赖）"
+  [ -x "$ROOTFS_DIR/usr/bin/mcopy" ] || die "mtools 装上仍缺 mcopy"
+  echo "   ✓ mtools 安装完成"
+fi
+# kmod: 完整 depmod/modprobe(libkmod)。OpenWrt 的 kmodloader 只认 modules.dep.bin,
+#   裁剪系统缺索引时 modprobe 全灭；40 步的 depmod -b 已生成 .bin, 装 kmod 让板上
+#   可自查/重建索引。最终归属 router D 组, 此处临时保障。
+if [ -x "$ROOTFS_DIR/usr/sbin/depmod" ]; then
+  echo "   ✓ kmod 已预装于 rootfs（/usr/sbin/depmod）"
+else
+  $SUDO chroot "$ROOTFS_DIR" /usr/bin/apk add kmod 2>/dev/null \
+    && [ -x "$ROOTFS_DIR/usr/sbin/depmod" ] \
+    && echo "   ✓ kmod 安装完成" \
+    || warn "kmod 装不上（无碍: .bin 已生成, modprobe 读索引不需要 depmod 命令）"
+fi
 for d in dev sys proc; do
   $SUDO umount "$ROOTFS_DIR/$d" 2>/dev/null || $SUDO umount -l "$ROOTFS_DIR/$d" 2>/dev/null || true
 done
