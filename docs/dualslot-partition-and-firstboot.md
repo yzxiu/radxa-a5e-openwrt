@@ -330,4 +330,6 @@ cat /mnt/mmcblk1p3/.dualslot-ready       # slot=b uuid=<槽B UUID>
 logread -e dualslot                     # 首启全程日志（>>> 前缀，38 行左右）
 ```
 
-OTA 主脚本（`upgrade-a5e.sh` + `openwrt-update-a5e`）见另文。
+OTA 主脚本已落地（`9f18bf4`）：`usr/sbin/upgrade-a5e.sh`（查 release→下载，
+仿 upgrade-lubancat.sh）+ `usr/sbin/openwrt-update-a5e`（底层双槽写入，仿
+openwrt-update-rockchip：dd 对侧槽 + 配置迁移 + 改 p1 extlinux root=UUID 切槽）。

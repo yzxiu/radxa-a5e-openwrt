@@ -1,7 +1,14 @@
-# A5E 双槽 OTA 升级 —— 设计方案
+# A5E 双槽 OTA 升级 —— 设计方案（演进存档）
 
 > 参照 `yzxiu-router` LubanCat-1（Rockchip）的双槽机制，移植到 Radxa Cubie A5E（Allwinner A527）。
-> 分支：`feat/dual-slot-ota` ｜ 状态：方案待确认，未实施
+> 分支：`feat/dual-slot-ota` ｜ **状态：已实施完成（2026-10-09）**
+
+> ⚠️ **本文档是设计演进的历史存档，不是现状描述。** 写作时点为 2026-10-07，
+> 其中 §2/§4/§5 的多项设计在随后两天的实机调试中被推翻或替换
+> （GPT→MBR、kernel 留 rootfs→分离 p1、distro_bootpart env 切换→改 extlinux root=UUID、
+> 5 分区→4 分区等）。过时章节均保留原文，并加注"【过时】"说明原因与最终方案。
+> **最终实现（权威版本）见 `docs/dualslot-partition-and-firstboot.md`**，
+> 踩坑全记录在 §5 K1–K13。
 
 ---
 
@@ -24,6 +31,10 @@
 ---
 
 ## 2. A5E 现状 vs LubanCat-1 差异
+
+> 【时点快照】以下"A5E 现状"是 **2026-10-05**（双槽改造前、main 分支单槽镜像）的状态，
+> 仅作改造前基线存档。该布局（p1 config/p2 efi/p3 rootfs，GPT）已被
+> `3f88a50` 起的 MBR 双槽布局取代。
 
 | | LubanCat-1 (Rockchip) | A5E (Allwinner) 现状 |
 |---|---|---|
@@ -60,20 +71,45 @@ SPL@LBA256 → U-Boot → distro_boot 扫描 bootable 分区(p2→p3) → p3 内
 - `uboot.env` 大概率在 p1（label=config，16M FAT 一直空置）——**待板上 `fw_printenv` 实测确认**（env 的 FAT 分区号要看 u-boot 配置，可能是 0:1）
 - extlinux.conf 用 `root=UUID=${rootfs_uuid}`，env 里存 `rootfs_uuid` + `slot=a|b`
 
+> 【过时】以上三条推论**最终都没采用**。2026-10-08 实机证据：① A5E U-Boot 期望
+> env 在 `0:2` 的 FAT（日志 `Loading Environment from FAT... Unable to use mmc 0:2`），
+> 而 env 工具链（fw_env.config 定位、fw_printenv 实测）在裁剪 rootfs 上不可靠；
+> ② 转 MBR 后 layout 全变，p1 config 分区整个取消。最终切槽杠杆改为
+> **改 p1 `extlinux.conf` 的 `root=UUID=`**（与 lubancat1 改 armbianEnv rootdev 同构，
+> 文件操作零依赖），`distro_bootpart`/`${rootfs_uuid}`/fw_env 路线全部放弃。
+
 ---
 
 ## 4. 目标设计
 
+> ⚠️⚠️ **【本节整体过时】** 这一版"定稿"写于 2026-10-07，当晚起的实机调试
+> 连续推翻了其中三条支柱（见下逐条标注）。**最终方案：MBR 分区表 +
+> 刷机包 2 分区（p1 boot FAT + p2 rootfs）→ 首启在线建 p3 槽B + p4 shared，
+> kernel 分离 p1，切槽=改 p1 extlinux root=UUID。** 完整实现见
+> `dualslot-partition-and-firstboot.md`。
+
 > **2026-10-07 定稿修正**（参考 ophub `openwrt-tf`/`openwrt-install-allwinner` 后）：
-> - **不改造 build-image 出双槽镜像**。刷机仍是单槽（现有流水线零改动），
->   **首次启动**由 `/etc/uci-defaults/99-a5e-init-dualslot` 在线改造：剩余空间切成
->   槽 B（dd 副本）+ shared（仅建分区）。uci-defaults 成功自删、失败下启重跑，天然幂等调度。
-> - **kernel 不挪出 rootfs**（各槽完整自含 /boot），extlinux 每槽一份、root= 写死自指 UUID。
->   原"kernel 挪 p2 共享 + `${rootfs_uuid}` 变量展开"方案作废——多了一个待实测风险点且无收益。
-> - **切换杠杆 = `distro_bootpart` env**（strings 已实证），OTA 时 `fw_setenv distro_bootpart 3|4`；
->   兜底用 sgdisk bootable 属性翻转（改 GPT，不依赖 env 可用性）。
+> - 【过时】"不改造 build-image 出双槽镜像" → **当晚即改**：`d759339` 重写
+>   custom/build-image（lubancat1 布局，kernel 分离 p2 FAT），原因是实机发现
+>   U-Boot env 期望 0:2 为 FAT + ext4 上 extlinux 脏读风险。
+> - 【过时】"kernel 不挪出 rootfs" → **同 commit 反转**：kernel/initrd/dtb
+>   分离到独立 boot 分区（与 lubancat1/op4 实机一致）。
+> - 【过时】"切换杠杆 = distro_bootpart env" → 改 extlinux root=UUID（见 §3 注）。
+> - ~~不改造 build-image 出双槽镜像~~【见上方逐条标注】
+> - ~~kernel 不挪出 rootfs~~【见上方逐条标注】
+> - ~~切换杠杆 = `distro_bootpart` env~~【见上方逐条标注】
+>
+> 保留有效的部分：首启 uci-defaults 在线改造（成功自删/失败重跑的调度机制）、
+> dd 副本做初始槽 B、"-U 指定 UUID"、配置迁移语义——这些在最终实现中全部保留。
 
 ### 4.1 分区布局（首启改造后）
+
+> 【过时】这是 **GPT 5 分区**方案（p1 config/p2 efi/p3/p4/p5）。
+> 被否原因：① 保留了 radxa 遗留 config/efi 分区，槽 B 排到 p4、shared p5，
+> 与 lubancat1 编号错位（用户明确指出"参考 lubancat1 不要擅自设计"）；
+> ② GPT 备份头机制对"dd 截断镜像刷大容量卡"是持续性坑（K1/K7）。
+> **最终：MBR 4 分区** `p1 boot FAT 128M / p2 rootfs 960M 槽A / p3 rootfs-b 槽B / p4 shared`，
+> 见 partition-and-firstboot.md §1。
 
 ```
 p1   16M    FAT   config        ← U-Boot env (uboot.env)，不动
@@ -84,6 +120,12 @@ p5   rest   ext4  shared-data   ← 共享数据（本期只建分区+挂载点�
 ```
 
 ### 4.2 首启初始化流程（uci-defaults 脚本）
+
+> 【部分过时】流程骨架（幂等双判定 / -U UUID / dd 副本 / ready 标记）与最终实现一致，
+> 但细节全变：`sgdisk`→`parted`（gptfdisk 在 feed 无二进制，K10）；
+> 槽 B=p4→p3、shared=p5→p4；"sed p4 extlinux 自指"步骤取消（extlinux 集中到 p1 唯一一份）；
+> `sgdisk -A bootable`→不需要（扫描命中 p1 的唯一 extlinux）。
+> 最终十步流程见 partition-and-firstboot.md §3.2。
 
 ```
 [0] 幂等: p4=rootfs-b 且内部有 .dualslot-ready 标记 → 退出
@@ -101,6 +143,10 @@ p5   rest   ext4  shared-data   ← 共享数据（本期只建分区+挂载点�
 ```
 
 ### 4.3 启动与切换
+
+> 【过时】fw_setenv/sgdisk 切换机制未采用（见 §3 注）。
+> 最终：U-Boot 扫描 bootable 分区命中 p1（唯一 extlinux），切槽 =
+> 改 p1 extlinux.conf 的 `root=UUID=`，见 partition-and-firstboot.md §3.4。
 
 ```
 启动: U-Boot distro_boot → 枚举 bootable 分区(p2无extlinux→p3命中) → 槽 A
@@ -124,6 +170,10 @@ OTA 切槽(后续 upgrade-a5e.sh 实现):
 
 ### 4.5 build 侧改造（radxa-a5e-openwrt 仓库）
 
+> 【过时】此表是"零改动 build-image"路线的配套，多数条目已不存在或被替换。
+> 实际落地的改造（`d759339` 起，共 20+ commit）见 partition-and-firstboot.md §2/§4；
+> 其中"fw_env 配置"一项**整体取消**（env 路线放弃，见 §3 注）。
+
 | 改动点 | 文件 | 内容 |
 |---|---|---|
 | 双槽 build-image | 新 `custom/build-image-dualslot` 或补丁 | 4 分区 GPT；p2 FAT 放 extlinux+vmlinuz+initrd+dtb；p3 解 rootfs；p4 mkfs 空槽 |
@@ -136,6 +186,10 @@ OTA 切槽(后续 upgrade-a5e.sh 实现):
 
 ### 4.6 调试期的验证步骤（本仓库先行，板子配合）
 
+> 【过时】第 1/2 步（fw_printenv 实测 / env 切换演练）随 env 路线取消而**不再需要做**；
+> 第 3/4 步的思路保留，实际执行的验证清单见 partition-and-firstboot.md §6
+> （以及 OTA 端到端演练：板上 `upgrade-a5e.sh --dry` → 全量升级 → 回滚）。
+
 1. `fw_printenv` 确认 env 位置与可写性（板上）
 2. 手工演练：p4 手动 mkfs + 复制当前 rootfs → `fw_setenv rootfs_uuid <p4 UUID>` → reboot，验证能从 p4 启动
 3. build-image 双槽化后本地出 img，dd 到卡实机验证
@@ -145,13 +199,15 @@ OTA 切槽(后续 upgrade-a5e.sh 实现):
 
 ## 5. 风险与待实测项
 
+> 【已消解】下表风险几乎全部通过**方案变更**（而非缓解措施）消除，最终状态逐条标注：
+
 | 风险 | 缓解 |
 |---|---|
-| `uboot.env` 实际所在 FAT 分区不明（0:1? 0:2?） | 板上 `fw_printenv` 实测；必要时 dd dump p1 头部确认；fw_env.config 按实测填 |
-| U-Boot sysboot 对 append 里 `${rootfs_uuid}` 的展开时机 | `mac_addr=${mac}` 已证展开机制存在；实测确认自定义变量同样展开 |
+| ~~`uboot.env` 实际所在 FAT 分区不明（0:1? 0:2?）~~ | **消除**：不用 env 切换（改 extlinux 文件），该风险无意义了 |
+| ~~U-Boot sysboot 对 append 里 `${rootfs_uuid}` 的展开时机~~ | **消除**：不用变量展开，root= 写死具体 UUID |
 | initrd 是否必须（现状 initrd 存在） | 保留现状 initrd 进 p2，不节外生枝 |
-| OpenWrt 首启 resize/fstab 逻辑与双槽冲突 | rootfs 模板里 /etc/config/fstab 固定两个槽 UUID；resize 改为对活动槽在线 resize |
-| 新镜像仍是单槽布局（本仓库旧流水线产物） | OTA 脚本兼容两种输入：losetup 后自动找 rootfs 分区（按 GPT label/type） |
+| OpenWrt 首启 resize/fstab 逻辑与双槽冲突 | **实锤为 growroot**（initramfs local-bottom，K2），用 `/etc/growroot-disabled` 空文件禁用；比原想的 resize 更隐蔽 |
+| ~~新镜像仍是单槽布局~~ | **消除**：新流水线本身产出双槽首启布局（2 分区刷机包），OTA 输入固定该格式 |
 | 升级中断电 | 双槽本质保护：写对侧槽期间当前槽不动；最坏情况对侧槽损坏，重跑 OTA 或切回 |
 
 ## 6. 与 yzxiu-router 的关系
@@ -159,3 +215,7 @@ OTA 切槽(后续 upgrade-a5e.sh 实现):
 - 本项目后续并入 `yzxiu-router` 作为**allwinner/a527 平台**（与 rockchip/lubancat-1 平行）
 - 本期先在 `radxa-a5e-openwrt` 本仓库 `feat/dual-slot-ota` 分支调试跑通；验证稳定后再抽象平台化
 - `upgrade-a5e.sh` 与 `upgrade-lubancat.sh` 保持同构（查 release→下载→双槽写入→配置迁移→切槽→reboot），便于将来在 router 仓库统一
+  【2026-10-09 已实现】`upgrade-a5e.sh` + `openwrt-update-a5e` 双层脚本已落地
+  （`9f18bf4`），OTA 端到端待真机演练。另注：`yzxiu-router/config/platform/radxa-a5e.conf`
+  已存在（定位：纯 rootfs 产物给 docker 用，不做 ophub remake），与本仓库的
+  "可刷双槽 img"是两种产物，平台化时需对齐定位
