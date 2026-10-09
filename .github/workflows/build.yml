@@ -123,6 +123,8 @@ jobs:
           chk()  { grep -qE "$1" "$L" && echo "✓ $2" || { echo "✗ 缺：$2"; exit 1; }; }
           nchk() { if grep -qE "$1" "$L"; then echo "✗ 不该有：$2"; exit 1; else echo "✓ $2"; fi; }
           chk  "sbin/parted$"                          "parted 在位（首启双槽初始化用）"
+          chk  "usr/sbin/openwrt-update-a5e$"          "OTA 底层脚本在位"
+          chk  "usr/sbin/upgrade-a5e\.sh$"             "OTA 升级封装脚本在位"
           # lubancat1 布局：dtb/kernel 已分离到 boot-files/（p2 FAT），不在 rootfs tar 里
           [ -f "../owrt/boot-files/dtb/sun55i-a527-cubie-a5e.dtb" ] \
             && echo "✓ dtb 在 boot-files/dtb/（lubancat1 布局，进 p2 FAT）" \

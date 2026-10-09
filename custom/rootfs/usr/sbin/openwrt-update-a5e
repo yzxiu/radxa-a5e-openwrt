@@ -1,0 +1,169 @@
+#!/bin/bash
+#=============================================================================
+# A5E 双槽 OTA 底层脚本（仿 ophub openwrt-update-rockchip/allwinner）
+#
+# 用法:
+#   openwrt-update-a5e <固件.img 或 .img.tar.gz> [no-restore]
+#
+# 流程:
+#   判当前槽(p2/p3) → 写 p1 boot(文件级, 保留 FAT UUID) → dd 新 rootfs 到
+#   对侧槽 → tune2fs 换 UUID/LABEL → [配置迁移 BACKUP_LIST] →
+#   改 p1 extlinux.conf root=UUID 切槽 → reboot
+#
+# 布局约定(本仓库 custom/build-image 产出):
+#   p1 boot(FAT128M) / p2 rootfs(槽A) / p3 rootfs-b(槽B, 首启建) / p4 shared
+#   切槽杠杆 = p1 extlinux.conf 的 root=UUID(等价 lubancat1 armbianEnv rootdev)
+#
+# KVER 绑定: dd 对侧槽后若新固件 KVER != 运行中 kernel, 会把新 /lib/modules
+# 同步进当前槽(回滚目标), 保证两个槽的 modules 都与 p1 新 kernel 匹配。
+#
+# 回滚: 写 p1 前会把当前 extlinux.conf 备份到 /mnt/shared/.dualslot-rollback/
+#   新槽启动失败 → mount /boot; cp 备份回 /boot/extlinux/extlinux.conf; reboot
+#=============================================================================
+set -euo pipefail
+
+IMG="${1:-}"
+NO_RESTORE=0
+[ "${2:-}" = "no-restore" ] && NO_RESTORE=1
+
+STEPS="[\033[95m STEPS \033[0m]"
+INFO="[\033[94m INFO \033[0m]"
+SUCCESS="[\033[92m SUCCESS \033[0m]"
+WARN="[\033[93m WARN \033[0m]"
+ERROR="[\033[91m ERROR \033[0m]"
+
+log()  { echo -e "${INFO} $*"; }
+ok()   { echo -e "${SUCCESS} $*"; }
+warn() { echo -e "${WARN} $*"; }
+die()  { echo -e "${ERROR} $*"; exit 1; }
+
+[ -n "${IMG}" ] && [ -f "${IMG}" ] || { echo "用法: openwrt-update-a5e <固件.img|.img.tar.gz> [no-restore]"; exit 1; }
+for tool in losetup tar blkid tune2fs dd e2fsck; do
+    command -v "$tool" >/dev/null 2>&1 || die "缺依赖: $tool"
+done
+
+# ---------- 1. 解固件 + 挂新 img ----------
+echo -e "${STEPS} A5E 双槽升级"
+WORK=$(mktemp -d /tmp/a5e-ota.XXXXXX)
+cleanup() {
+    umount -f "${WORK}"/p1 "${WORK}"/p2 "${WORK}"/new 2>/dev/null || true
+    losetup -D 2>/dev/null || true
+    rm -rf "${WORK}"
+}
+trap cleanup EXIT
+
+SRC_IMG="${IMG}"
+if [[ "${IMG}" == *.tar.gz ]]; then
+    log "解包 ${IMG}"
+    tar -xzf "${IMG}" -C "${WORK}" || die "解包失败"
+    SRC_IMG=$(find "${WORK}" -maxdepth 1 -name "*.img" | head -1)
+    [ -n "${SRC_IMG}" ] || die "tar.gz 里没有 .img"
+fi
+
+LOOP=$(losetup -f -P --show "${SRC_IMG}") || die "losetup 失败"
+sleep 1
+mkdir -p "${WORK}/p1" "${WORK}/p2" "${WORK}/new"
+mount -t vfat -o ro "${LOOP}p1" "${WORK}/p1" || die "挂新 img p1 失败"
+mount -t ext4 -o ro "${LOOP}p2" "${WORK}/p2" || die "挂新 img p2 失败（该固件 rootfs 不是 ext4?）"
+log "新固件已挂载: ${LOOP}"
+
+# ---------- 2. 判槽 ----------
+CUR_UUID="$(sed -n 's/.*root=UUID=\([^ ]*\).*/\1/p' /proc/cmdline)"
+[ -n "${CUR_UUID}" ] || die "cmdline 无 root=UUID"
+CUR_DEV="$(blkid -U "${CUR_UUID}" 2>/dev/null)" || die "找不到根设备 ${CUR_UUID}"
+DISK="$(echo "${CUR_DEV}" | sed -E 's/p[0-9]+$//')"
+PT_PRE="${DISK}p"
+
+case "${CUR_DEV}" in
+    *p2) NEW_DEV="${PT_PRE}3"; NEW_LABEL="rootfs-b" ;;
+    *p3) NEW_DEV="${PT_PRE}2"; NEW_LABEL="rootfs" ;;
+    *)   die "根分区 ${CUR_DEV} 不是 p2/p3，非双槽布局（先跑首启初始化）" ;;
+esac
+NEW_UUID="$(cat /proc/sys/kernel/random/uuid)"
+log "当前槽: ${CUR_DEV}  →  对侧槽: ${NEW_DEV} (新 UUID=${NEW_UUID})"
+
+# 对侧槽存在性（首启未跑/分区丢失）
+[ -b "${NEW_DEV}" ] || die "对侧槽 ${NEW_DEV} 不存在，先完成首启双槽初始化"
+blkid "${NEW_DEV}" | grep -q 'TYPE="ext4"' || warn "对侧槽不是 ext4（${NEW_DEV}），mkfs 将覆盖"
+
+# ---------- 3. 几何校验（新固件 rootfs 必须装得进对侧槽）----------
+IMG_P2_SECTORS=$(blockdev --getsz "${LOOP}p2")
+NEW_SECTORS=$(blockdev --getsz "${NEW_DEV}")
+[ "${NEW_SECTORS}" -ge "${IMG_P2_SECTORS}" ] \
+    || die "对侧槽 ${NEW_SECTORS} sectors < 新固件 ${IMG_P2_SECTORS}，装不下"
+
+# ---------- 4. 写 p1 boot（文件级，保留 FAT UUID）----------
+# 系统已自动挂载 /boot（首启 uci fstab 段）；没挂则手动挂。
+mountpoint -q /boot || mount -t vfat "${PT_PRE}1" /boot || die "挂载 /boot 失败"
+ROLLBACK_DIR=/mnt/shared/.dualslot-rollback
+# 回滚保险放 shared(p4)：跨槽存活，新槽启动失败也能读到
+mountpoint -q /mnt/shared || mount -t ext4 "${PT_PRE}4" /mnt/shared 2>/dev/null || true
+mkdir -p "${ROLLBACK_DIR}"
+TS="$(date +%Y%m%d-%H%M%S)"
+cp /boot/extlinux/extlinux.conf "${ROLLBACK_DIR}/extlinux.conf.${TS}" 2>/dev/null \
+    && log "回滚保险: extlinux.conf → ${ROLLBACK_DIR}/extlinux.conf.${TS}"
+
+log "重写 p1 boot（vmlinuz/initrd/dtb，保留 FAT UUID）"
+rm -rf /boot/vmlinuz /boot/initrd.img /boot/dtb /boot/extlinux
+cp "${WORK}/p1/vmlinuz"    /boot/ 2>/dev/null || warn "新固件无 vmlinuz?"
+cp "${WORK}/p1/initrd.img" /boot/ 2>/dev/null || true
+cp -r "${WORK}/p1/dtb"     /boot/ || die "拷贝 dtb 失败"
+mkdir -p /boot/extlinux
+umount /boot 2>/dev/null || true   # 后面切槽段统一重写
+
+# ---------- 5. 写对侧槽（dd 位级 + UUID/LABEL 去重）----------
+echo -e "${STEPS} dd 新 rootfs → ${NEW_DEV}（请稍候）"
+dd if="${LOOP}p2" of="${NEW_DEV}" bs=4M conv=fsync status=none || die "dd 失败"
+e2fsck -f -y "${NEW_DEV}" >/dev/null 2>&1 || warn "e2fsck 有修正（在线复制正常现象）"
+tune2fs -U "${NEW_UUID}" -L "${NEW_LABEL}" "${NEW_DEV}" || die "tune2fs 失败"
+sync
+
+# ---------- 6. KVER 绑定处理 ----------
+NEW_KVER="$(ls "${WORK}/p2/lib/modules/" 2>/dev/null | head -1)"
+CUR_KVER="$(uname -r)"
+if [ -n "${NEW_KVER}" ] && [ "${NEW_KVER}" != "${CUR_KVER}" ]; then
+    log "KVER 变化: ${CUR_KVER} → ${NEW_KVER}，同步当前槽 /lib/modules（回滚兼容性）"
+    rm -rf "/lib/modules/${CUR_KVER}"
+    cp -a "${WORK}/p2/lib/modules/${NEW_KVER}" /lib/modules/ || warn "modules 同步失败（回滚槽将 KVER 不匹配）"
+else
+    log "KVER 一致 (${CUR_KVER})，无需同步"
+fi
+
+# ---------- 7. 配置迁移 ----------
+BACKUP_LIST="./etc/config ./etc/shadow ./etc/passwd ./etc/group ./etc/ssh
+    ./root/.ssh ./etc/sysctl.d ./etc/modprobe.d ./etc/rc.local ./etc/hosts
+    ./etc/crontabs ./etc/sing-box ./etc/gost ./etc/smartdns"
+# 故意不含: etc/fstab（/ 行 UUID 随槽位变，迁移后单独修正）、etc/config/fstab
+# （/boot 段指向 p1 FAT UUID——p1 文件级重写后 UUID 不变，原样迁移即可）
+
+if [ "${NO_RESTORE}" = "0" ]; then
+    echo -e "${STEPS} 配置迁移（旧系统 → 新槽）"
+    mount -t ext4 "${NEW_DEV}" "${WORK}/new" || die "挂新槽失败"
+    mkdir -p "${WORK}/new/.reserved"
+    ( cd / && eval tar czf "${WORK}/new/.reserved/openwrt_config.tar.gz" ${BACKUP_LIST} 2>/dev/null ) \
+        || warn "部分配置路径不存在（继续）"
+    ( cd "${WORK}/new" && tar xzf .reserved/openwrt_config.tar.gz 2>/dev/null ) || true
+    # / 行 UUID 指向新槽自己
+    sed -i -E "s|^UUID=[^ ]+[[:space:]]+/[[:space:]]|UUID=${NEW_UUID} / |" "${WORK}/new/etc/fstab"
+    log "新槽 fstab / 行 → UUID=${NEW_UUID}"
+    umount "${WORK}/new" 2>/dev/null || umount -f "${WORK}/new" || true
+    sync
+else
+    log "no-restore：跳过配置迁移"
+fi
+
+# ---------- 8. 切槽（改 p1 extlinux.conf root=UUID）----------
+log "切槽: root=UUID=${NEW_UUID} (${NEW_DEV})"
+mount -t vfat "${PT_PRE}1" /boot || die "挂 p1 失败"
+cp "${WORK}/p1/extlinux/extlinux.conf" /boot/extlinux/extlinux.conf
+sed -i -E "s/root=UUID=[^ ]*/root=UUID=${NEW_UUID}/" /boot/extlinux/extlinux.conf
+grep -q "root=UUID=${NEW_UUID}" /boot/extlinux/extlinux.conf || die "extlinux root=UUID 替换未命中"
+cat /boot/extlinux/extlinux.conf | grep -E "root=UUID"
+umount /boot 2>/dev/null || true
+
+# ---------- 9. 收尾 ----------
+echo -e "${STEPS} 即将重启，从新槽 ${NEW_DEV} 启动"
+echo "      回滚: mount /boot; cp ${ROLLBACK_DIR}/extlinux.conf.${TS} /boot/extlinux/extlinux.conf; reboot"
+sync
+sleep 3
+reboot
