@@ -207,15 +207,28 @@ extlinux.conf 唯一一份在 p1（FAT）。切槽 = 改它的 `root=UUID=` 指�
 
 ---
 
-## 4. 构建期依赖链（40 步保障）
+## 4. 依赖链（保障方式与最终归属）
 
-| 依赖 | 保障方式 | 原因 |
-|---|---|---|
-| parted | rootfs 预装检测 → 缺则 `apk add parted` | ImmortalWrt 基础系统不带分区工具；gptfdisk 在 feed 无二进制（404），parted 与 ophub openwrt-tf 同款 |
-| tune2fs | 检测 → `apk add tune2fs` → 仍缺则 `apk fix` | ImmortalWrt 把 e2fsprogs 拆子包，**tune2fs 独立包**；且 rootfs 的 apk db 可能有记录但二进制被 remake 裁剪（add 判已满足不装文件，fix 补） |
-| modules.dep.bin | 装配后 `depmod -b $ROOTFS_DIR $KVER`（workflow host 装 kmod） | kernel-actions 只打包文本 modules.dep；OpenWrt modprobe(/sbin/kmodloader→libkmod) 只认 .bin，缺了全模块 exit 255 |
-| vfat builtin | kernel 仓 `configs/a5e-openwrt.config`：`FAT_FS/VFAT_FS/NLS/NLS_CODEPAGE_437/NLS_ISO8859_1 = y` | 用户要求：挂载 /boot 不依赖模块加载链（kernel rel-20261008-064157-r19 起） |
-| growroot 禁用 | overlay 空文件 `custom/rootfs/etc/growroot-disabled` | radxa Debian initrd 自带 growroot（initramfs local-bottom），首启会把 rootfs 分区扩到盘尾 + resize2fs。该脚本检测到此文件即跳过（`-f` 只测存在，空文件即可） |
+> **归属原则（2026-10-09 定）**：运行时用到的工具/内核能力，**最终归属**在
+> 上游而非本仓库的构建期兜底——rootfs 包 → `yzxiu-router/config/platform/radxa-a5e.conf`
+> （该 rootfs 是本流水线 30 步的输入）；内核能力 → `radxa-a5e-openwrt-kernel/configs/a5e-openwrt.config`。
+> 本仓库 40 步的 `apk add` 兜底**保留**（防御 rootfs 来源未更新的过渡期），
+> 等上游 release 验证后可评估去留。
+
+| 依赖 | 最终归属 | 本仓库过渡保障 | 原因 |
+|---|---|---|---|
+| parted/fdisk/lsblk/losetup 等 | router radxa-a5e.conf A 组（`5044c0d`） | 40 步 `apk add` | 首启分区/OTA 的磁盘工具链 |
+| **tune2fs** | router radxa-a5e.conf D 组（`41e1d5d`） | 40 步 `apk add`+`apk fix` | e2fsprogs 拆分子包独立包名；apk db 记录与文件脱节时 add 不装文件需 fix 补 |
+| **mtools** | router radxa-a5e.conf D 组（`41e1d5d`） | OTA 脚本运行提示 | OTA 无 loop 方案从 img FAT p1 提取文件（@@偏移 mcopy） |
+| **kmod**（完整 depmod/modprobe） | router radxa-a5e.conf D 组（`41e1d5d`） | 40 步 `depmod -b` | 裁剪系统缺 modules.dep.bin 时 kmodloader 全灭（modprobe exit 255） |
+| modules.dep.bin | kernel-actions 打包改进 或 板上 kmod | 40 步 `depmod -b $ROOTFS_DIR`（workflow host 装 kmod） | kernel-actions 只打包文本 .dep；kmodloader 只认 .bin |
+| vfat builtin | kernel configs（`1d16dac`） | — | 挂载 /boot 不依赖模块加载链 |
+| **BLK_DEV_LOOP builtin** | kernel configs（`ccce8d6`） | OTA 无 loop 方案（偏移 dd+mtools） | 板上实机无 loop 节点；补齐后 losetup 可用 |
+| WiFi 驱动打印 | kernel vendor/aic8800（`488d88d`） | — | 裸 printk 降 pr_debug |
+| growroot 禁用 | overlay `custom/rootfs/etc/growroot-disabled` | — | radxa initrd 自带 growroot，检测到此文件即跳过 |
+
+**rootfs 定位**（router radxa-a5e.conf 注释，2026-10-09）：
+主用途 = 直接系统的 rootfs（被本流水线 30 步消费）；备用 = docker import 基础层。
 
 ---
 
@@ -330,4 +343,6 @@ cat /mnt/mmcblk1p3/.dualslot-ready       # slot=b uuid=<槽B UUID>
 logread -e dualslot                     # 首启全程日志（>>> 前缀，38 行左右）
 ```
 
-OTA 主脚本（`upgrade-a5e.sh` + `openwrt-update-a5e`）见另文。
+OTA 主脚本已落地（`9f18bf4`）：`usr/sbin/upgrade-a5e.sh`（查 release→下载，
+仿 upgrade-lubancat.sh）+ `usr/sbin/openwrt-update-a5e`（底层双槽写入，仿
+openwrt-update-rockchip：dd 对侧槽 + 配置迁移 + 改 p1 extlinux root=UUID 切槽）。
