@@ -38,7 +38,9 @@ warn() { echo -e "${WARN} $*"; }
 die()  { echo -e "${ERROR} $*"; exit 1; }
 
 [ -n "${IMG}" ] && [ -f "${IMG}" ] || { echo "用法: openwrt-update-a5e <固件.img|.img.tar.gz> [no-restore]"; exit 1; }
-for tool in losetup tar blkid tune2fs dd e2fsck; do
+# 不依赖 loop 设备（kernel 未编 BLK_DEV_LOOP，板上无 loop 节点）：
+#   p2 分区按镜像内偏移 dd 直写；p1(FAT) 用 mtools @@偏移 提取文件。
+for tool in tar blkid tune2fs dd e2fsck mcopy; do
     command -v "$tool" >/dev/null 2>&1 || die "缺依赖: $tool"
 done
 
@@ -48,8 +50,7 @@ echo -e "${STEPS} A5E 双槽升级"
 # → 用 shared 分区（p4，27G）。挂载检查在判槽(拿到 PT_PRE)之后；中断残留靠 cleanup。
 WORK=$(mktemp -d /mnt/shared/.ota-tmp.XXXXXX)
 cleanup() {
-    umount -f "${WORK}"/p1 "${WORK}"/p2 "${WORK}"/new 2>/dev/null || true
-    losetup -D 2>/dev/null || true
+    umount -f "${WORK}"/new 2>/dev/null || true
     rm -rf "${WORK}"
 }
 trap cleanup EXIT
@@ -62,12 +63,14 @@ if [[ "${IMG}" == *.tar.gz ]]; then
     [ -n "${SRC_IMG}" ] || die "tar.gz 里没有 .img"
 fi
 
-LOOP=$(losetup -f -P --show "${SRC_IMG}") || die "losetup 失败"
-sleep 1
-mkdir -p "${WORK}/p1" "${WORK}/p2" "${WORK}/new"
-mount -t vfat -o ro "${LOOP}p1" "${WORK}/p1" || die "挂新 img p1 失败"
-mount -t ext4 -o ro "${LOOP}p2" "${WORK}/p2" || die "挂新 img p2 失败（该固件 rootfs 不是 ext4?）"
-log "新固件已挂载: ${LOOP}"
+# 新 img 的分区几何（custom/build-image 定义，变更需同步此处）：
+IMG_P1_START=32768;  IMG_P1_SECTORS=262144
+IMG_P2_START=294912; IMG_P2_SECTORS=1966080
+IMG_SECTORS=$(( $(stat -c %s "${SRC_IMG}") / 512 ))
+[ "${IMG_SECTORS}" -ge "$((IMG_P2_START + IMG_P2_SECTORS))" ] \
+    || die "img 尺寸异常: ${IMG_SECTORS} sectors < p2 结束 $((IMG_P2_START + IMG_P2_SECTORS))"
+IMG_P1_OFF=$(( IMG_P1_START * 512 ))
+log "新固件就绪: ${SRC_IMG}（p1@LBA${IMG_P1_START} p2@LBA${IMG_P2_START}）"
 
 # ---------- 2. 判槽 ----------
 CUR_UUID="$(sed -n 's/.*root=UUID=\([^ ]*\).*/\1/p' /proc/cmdline)"
@@ -93,7 +96,6 @@ grep -q " /mnt/shared " /proc/mounts || die "/mnt/shared 未挂载（首启未�
 blkid "${NEW_DEV}" | grep -q 'TYPE="ext4"' || warn "对侧槽不是 ext4（${NEW_DEV}），mkfs 将覆盖"
 
 # ---------- 3. 几何校验（新固件 rootfs 必须装得进对侧槽）----------
-IMG_P2_SECTORS=$(blockdev --getsz "${LOOP}p2")
 NEW_SECTORS=$(blockdev --getsz "${NEW_DEV}")
 [ "${NEW_SECTORS}" -ge "${IMG_P2_SECTORS}" ] \
     || die "对侧槽 ${NEW_SECTORS} sectors < 新固件 ${IMG_P2_SECTORS}，装不下"
@@ -109,28 +111,34 @@ TS="$(date +%Y%m%d-%H%M%S)"
 cp /boot/extlinux/extlinux.conf "${ROLLBACK_DIR}/extlinux.conf.${TS}" 2>/dev/null \
     && log "回滚保险: extlinux.conf → ${ROLLBACK_DIR}/extlinux.conf.${TS}"
 
-log "重写 p1 boot（vmlinuz/initrd/dtb，保留 FAT UUID）"
+log "重写 p1 boot（vmlinuz/initrd/dtb，保留 FAT UUID；mtools 提取）"
 rm -rf /boot/vmlinuz /boot/initrd.img /boot/dtb /boot/extlinux
-cp "${WORK}/p1/vmlinuz"    /boot/ 2>/dev/null || warn "新固件无 vmlinuz?"
-cp "${WORK}/p1/initrd.img" /boot/ 2>/dev/null || true
-cp -r "${WORK}/p1/dtb"     /boot/ || die "拷贝 dtb 失败"
+mcopy -i "${SRC_IMG}@@${IMG_P1_OFF}" ::/vmlinuz    /boot/ || die "提取 vmlinuz 失败"
+mcopy -i "${SRC_IMG}@@${IMG_P1_OFF}" ::/initrd.img /boot/ 2>/dev/null || true
+mkdir -p /boot/dtb
+mcopy -i "${SRC_IMG}@@${IMG_P1_OFF}" "::/dtb/*" /boot/dtb/ || die "提取 dtb 失败"
 mkdir -p /boot/extlinux
+mcopy -i "${SRC_IMG}@@${IMG_P1_OFF}" ::/extlinux/extlinux.conf "${WORK}/extlinux.conf.new" \
+    || die "提取 extlinux.conf 失败"
 umount /boot 2>/dev/null || true   # 后面切槽段统一重写
 
 # ---------- 5. 写对侧槽（dd 位级 + UUID/LABEL 去重）----------
-echo -e "${STEPS} dd 新 rootfs → ${NEW_DEV}（请稍候）"
-dd if="${LOOP}p2" of="${NEW_DEV}" bs=4M conv=fsync status=none || die "dd 失败"
+echo -e "${STEPS} dd 新 rootfs → ${NEW_DEV}（按镜像内偏移直写, 请稍候）"
+dd if="${SRC_IMG}" of="${NEW_DEV}" bs=4M skip=$((IMG_P2_START / 8)) \
+   count=$((IMG_P2_SECTORS / 8)) conv=fsync status=none || die "dd 失败"
 e2fsck -f -y "${NEW_DEV}" >/dev/null 2>&1 || warn "e2fsck 有修正（在线复制正常现象）"
 tune2fs -U "${NEW_UUID}" -L "${NEW_LABEL}" "${NEW_DEV}" || die "tune2fs 失败"
 sync
 
 # ---------- 6. KVER 绑定处理 ----------
-NEW_KVER="$(ls "${WORK}/p2/lib/modules/" 2>/dev/null | head -1)"
+mkdir -p "${WORK}/new"
+mount -t ext4 "${NEW_DEV}" "${WORK}/new" || die "挂新槽失败"
+NEW_KVER="$(ls "${WORK}/new/lib/modules/" 2>/dev/null | head -1)"
 CUR_KVER="$(uname -r)"
 if [ -n "${NEW_KVER}" ] && [ "${NEW_KVER}" != "${CUR_KVER}" ]; then
     log "KVER 变化: ${CUR_KVER} → ${NEW_KVER}，同步当前槽 /lib/modules（回滚兼容性）"
     rm -rf "/lib/modules/${CUR_KVER}"
-    cp -a "${WORK}/p2/lib/modules/${NEW_KVER}" /lib/modules/ || warn "modules 同步失败（回滚槽将 KVER 不匹配）"
+    cp -a "${WORK}/new/lib/modules/${NEW_KVER}" /lib/modules/ || warn "modules 同步失败（回滚槽将 KVER 不匹配）"
 else
     log "KVER 一致 (${CUR_KVER})，无需同步"
 fi
@@ -144,7 +152,6 @@ BACKUP_LIST="./etc/config ./etc/shadow ./etc/passwd ./etc/group ./etc/ssh
 
 if [ "${NO_RESTORE}" = "0" ]; then
     echo -e "${STEPS} 配置迁移（旧系统 → 新槽）"
-    mount -t ext4 "${NEW_DEV}" "${WORK}/new" || die "挂新槽失败"
     mkdir -p "${WORK}/new/.reserved"
     ( cd / && eval tar czf "${WORK}/new/.reserved/openwrt_config.tar.gz" ${BACKUP_LIST} 2>/dev/null ) \
         || warn "部分配置路径不存在（继续）"
@@ -161,7 +168,7 @@ fi
 # ---------- 8. 切槽（改 p1 extlinux.conf root=UUID）----------
 log "切槽: root=UUID=${NEW_UUID} (${NEW_DEV})"
 mount -t vfat "${PT_PRE}1" /boot || die "挂 p1 失败"
-cp "${WORK}/p1/extlinux/extlinux.conf" /boot/extlinux/extlinux.conf
+cp "${WORK}/extlinux.conf.new" /boot/extlinux/extlinux.conf
 sed -i -E "s/root=UUID=[^ ]*/root=UUID=${NEW_UUID}/" /boot/extlinux/extlinux.conf
 grep -q "root=UUID=${NEW_UUID}" /boot/extlinux/extlinux.conf || die "extlinux root=UUID 替换未命中"
 cat /boot/extlinux/extlinux.conf | grep -E "root=UUID"
