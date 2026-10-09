@@ -25,12 +25,13 @@ SUCCESS="[\033[92m SUCCESS \033[0m]"
 WARN="[\033[93m WARN \033[0m]"
 ERROR="[\033[91m ERROR \033[0m]"
 
-# uci-defaults 阶段的 stdout 不一定上串口（procd boot 服务输出被吞），
-# logger -s 强制写控制台 + 系统日志（logread -t dualslot 可查全程）。
-log()  { echo -e "${INFO} $*"; logger -s -t dualslot "$*" 2>/dev/null || true; }
-ok()   { echo -e "${SUCCESS} $*"; logger -s -t dualslot "$*" 2>/dev/null || true; }
-warn() { echo -e "${WARN} $*"; logger -s -t dualslot "WARN: $*" 2>/dev/null || true; }
-die()  { echo -e "${ERROR} $*"; logger -s -t dualslot "ERROR: $*" 2>/dev/null || true; exit 1; }
+# uci-defaults 阶段的 stdout/stderr 被 procd boot 服务吞掉（logger -s 也上不去），
+# 写 /dev/kmsg 走 kernel console 通道——串口 console=ttyAS0 必达（与 dmesg 同路）。
+# logger 另写 syslog 供 logread -e dualslot 查询。
+log()  { echo -e "${INFO} $*";  echo "<6>dualslot: $*" > /dev/kmsg 2>/dev/null; logger -t dualslot "$*" 2>/dev/null; }
+ok()   { echo -e "${SUCCESS} $*"; echo "<6>dualslot: $*" > /dev/kmsg 2>/dev/null; logger -t dualslot "$*" 2>/dev/null; }
+warn() { echo -e "${WARN} $*";  echo "<4>dualslot: WARN: $*" > /dev/kmsg 2>/dev/null; logger -t dualslot "WARN: $*" 2>/dev/null; }
+die()  { echo -e "${ERROR} $*"; echo "<3>dualslot: ERROR: $*" > /dev/kmsg 2>/dev/null; logger -t dualslot "ERROR: $*" 2>/dev/null; exit 1; }
 
 echo -e "${STEPS} A5E 双槽初始化开始"
 
