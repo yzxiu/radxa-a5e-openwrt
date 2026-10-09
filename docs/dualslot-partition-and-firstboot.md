@@ -318,6 +318,27 @@ extlinux.conf 唯一一份在 p1（FAT）。切槽 = 改它的 `root=UUID=` 指�
   status=progress），每 10 块打百分比。
 - commit：`62d5d5e`（logger -s 版）、`8f0636c`（kmsg 版）、`d03103b`（>>> 醒目版）
 
+### K14. 挂载缓存回写覆盖块设备直写（2026-10-09 op6 事故，最严重）
+- **现象链**：OTA 报成功但 p3 UUID 仍是 p2 旧值（tune2fs 白改）→ p2/p3 同
+  UUID → extlinux 指向的 `root=UUID=9dbd5952` 找不到设备 → initramfs 干等
+  180s 无输出 → 手动引导 `root=UUID=018ba076` 也挂到 p3（同 UUID 先匹配）→
+  首启脚本以 p3 为槽A基准算槽B = p3 自己 → **dd 自复制 + e2fsck 在
+  运行中的根上执行 → 文件系统损坏**。
+- **根因**：block-mount 把旧 p3（label=rootfs-b）自动挂在 /mnt/mmcblk1p3。
+  OTA 的 dd/e2fsck/tune2fs 直接操作块设备，而内核挂载中的 ext4 会随时把
+  页缓存的旧 superblock **回写设备**，把直写的数据静默冲掉。挂载状态下
+  对块设备直接 IO = 与内核缓存打架，必败。
+- **修复**（`f9329cb`，参考 ophub update-rockchip）：
+  1. 判槽改按挂载点（`awk '$2=="/"{print $1}' /proc/mounts`），不用 cmdline
+     UUID 反查——挂载点是运行事实不会错；
+  2. OTA 写对侧槽前强制卸载其全部挂载点，并回读 /proc/mounts 校验未挂载；
+  3. tune2fs 后 blkid 回读验证 UUID/LABEL，不符即 die（防静默失败）；
+  4. 判槽前置到解包前（WORK 落在 shared，依赖 PT_PRE，修挂载顺序错误）；
+  5. 首启根非 p2 时 log+exit 0（OTA 后槽B首启是正常场景，die 会滞留
+     uci-defaults 每启重跑）。
+- **教训**：双槽方案里任何对非当前根分区的块设备直写（dd/tune2fs/e2fsck/
+  mkfs），写前必须确认它未挂载；UUID/LABEL 改动后必须回读验证。
+
 ### K12. 其他小坑
 - `etc/kernel` 目录忘建（重写 40 步 ③ 段时丢了 mkdir）→ `e413c00`
 - `/boot/extlinux` mkdir 在 mount p1 之前（建在 p2 上）→ `ad3c01b`
